@@ -1,0 +1,50 @@
+from app.llm import llm
+from app.schemas import QueryAnalysis
+from app.state import ConversationState
+
+
+query_analyzer = llm.with_structured_output(QueryAnalysis)
+
+
+def analyze_query(state: ConversationState) -> dict:
+    user_query = state["user_query"]
+    chat_history = state.get("chat_history", [])
+
+    history_text = "\n".join(
+        f'{message["role"]}: {message["content"]}'
+        for message in chat_history[-6:]
+    )
+
+    prompt = f"""
+You are the query analysis component of a conversational statistics assistant.
+
+Classify the latest user message as exactly one of:
+- simple: a complete request that can be answered directly
+- follow_up: depends on previous conversation context
+- multi_intent: contains multiple independent requests
+- complex: requires multiple dependent steps
+- clarification: lacks required information and cannot be resolved from history
+
+Conversation history:
+{history_text or "No previous conversation."}
+
+Latest user message:
+{user_query}
+
+Rules:
+- If the latest message depends on earlier context, return query_type as follow_up.
+- If enough context exists, create a complete standalone_query.
+- For simple, multi_intent, and complex queries, standalone_query should contain the complete request.
+- If essential information is missing and cannot be inferred, set needs_clarification to true and provide one concise clarification_question.
+- Do not answer the statistical question.
+"""
+
+    analysis = query_analyzer.invoke(prompt)
+
+    return {
+        "query_type": analysis.query_type,
+        "standalone_query": analysis.standalone_query,
+        "clarification_needed": analysis.needs_clarification,
+        "clarification_question": analysis.clarification_question,
+        "error": None,
+    }

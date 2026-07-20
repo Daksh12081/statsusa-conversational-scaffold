@@ -1,9 +1,11 @@
-
 from app.graph import graph
 print("✅ Imported graph")
 
 
+
 SESSION_ID = "demo-session"
+MAX_HISTORY_TURNS = 10
+MAX_HISTORY_MESSAGES = MAX_HISTORY_TURNS * 2
 
 
 def create_initial_state() -> dict:
@@ -11,16 +13,21 @@ def create_initial_state() -> dict:
         "session_id": SESSION_ID,
         "user_query": "",
         "chat_history": [],
+        "conversation_summary": "",
         "query_type": None,
         "standalone_query": None,
         "current_intent": None,
         "intent_history": [],
         "intent_confirmation_needed": False,
         "intent_confirmation_question": None,
+        "pending_confirmation": False,
+        "pending_intent": None,
+        "confirmation_response": None,
         "tasks": [],
         "response_mode": None,
         "task_results": [],
         "final_response": None,
+        "recommended_chart": None,
         "clarification_needed": False,
         "clarification_question": None,
         "error": None,
@@ -32,15 +39,20 @@ def reset_turn_fields(state: dict, user_query: str) -> dict:
         **state,
         "session_id": SESSION_ID,
         "user_query": user_query,
+        "conversation_summary": state.get("conversation_summary", ""),
         "query_type": None,
         "standalone_query": None,
         "current_intent": None,
         "intent_confirmation_needed": False,
         "intent_confirmation_question": None,
+        "pending_confirmation": False,
+        "pending_intent": None,
+        "confirmation_response": None,
         "tasks": [],
         "response_mode": None,
         "task_results": [],
         "final_response": None,
+        "recommended_chart": None,
         "clarification_needed": False,
         "clarification_question": None,
         "error": None,
@@ -68,6 +80,27 @@ def get_thread_state(config: dict) -> dict:
     return create_initial_state()
 
 
+
+def parse_confirmation_response(user_query: str) -> bool | None:
+    normalized = user_query.strip().lower()
+
+    if normalized in {"yes", "y", "correct", "confirm", "confirmed", "proceed"}:
+        return True
+
+    if normalized in {"no", "n", "incorrect", "change", "cancel"}:
+        return False
+
+    return None
+
+# Cap the chat history to the max allowed messages
+def cap_chat_history(chat_history: list[dict]) -> list[dict]:
+    return chat_history[-MAX_HISTORY_MESSAGES:]
+
+
+def should_summarize(chat_history: list[dict]) -> bool:
+    return len(chat_history) > MAX_HISTORY_MESSAGES
+
+
 def print_node_update(node_name: str, node_update: dict) -> None:
     if node_name == "analyze_query":
         query_type = node_update.get("query_type")
@@ -85,6 +118,20 @@ def print_node_update(node_name: str, node_update: dict) -> None:
         standalone_query = node_update.get("standalone_query")
         print("Resolving conversation context...")
         print(f"  Standalone query: {standalone_query}")
+        return
+
+    if node_name == "extract_intent":
+        intent = node_update.get("current_intent")
+        confirmation_needed = node_update.get("intent_confirmation_needed")
+        print("Extracting structured intent...")
+        print(f"  Intent: {intent}")
+        print(f"  Confirmation needed: {confirmation_needed}")
+        return
+
+    if node_name == "confirm_intent":
+        question = node_update.get("final_response")
+        print("Confirming interpreted intent...")
+        print(f"  Question: {question}")
         return
 
     if node_name == "create_task_plan":
@@ -164,7 +211,46 @@ if __name__ == "__main__":
             continue
 
         previous_state = get_thread_state(config)
-        turn_state = reset_turn_fields(previous_state, user_query)
+
+        if previous_state.get("pending_confirmation"):
+            confirmation = parse_confirmation_response(user_query)
+
+            if confirmation is None:
+                print("Please answer with 'yes' or 'no'.\n")
+                continue
+
+            if confirmation is False:
+                rejection_message = "Okay. Please restate or correct your request."
+                print(f"Assistant: {rejection_message}\n")
+
+                graph.update_state(
+                    config,
+                    {
+                        "pending_confirmation": False,
+                        "pending_intent": None,
+                        "confirmation_response": False,
+                        "intent_confirmation_needed": False,
+                        "intent_confirmation_question": None,
+                    },
+                )
+                continue
+
+            original_query = (
+                previous_state.get("standalone_query")
+                or previous_state.get("user_query")
+            )
+
+            turn_state = reset_turn_fields(previous_state, original_query)
+            turn_state.update(
+                {
+                    "current_intent": previous_state.get("pending_intent"),
+                    "pending_intent": previous_state.get("pending_intent"),
+                    "pending_confirmation": False,
+                    "confirmation_response": True,
+                }
+            )
+        else:
+            turn_state = reset_turn_fields(previous_state, user_query)
 
         print()
         for update in graph.stream(
@@ -192,9 +278,26 @@ if __name__ == "__main__":
         updated_history.append({"role": "user", "content": user_query})
         updated_history.append({"role": "assistant", "content": assistant_message})
 
+        needs_summary = should_summarize(updated_history)
+
+        if needs_summary:
+            summary_update = graph.invoke(
+                {
+                    "chat_history": updated_history,
+                    "conversation_summary": result.get("conversation_summary", ""),
+                },
+                config=config,
+            )
+
+            if summary_update.get("conversation_summary"):
+                result["conversation_summary"] = summary_update["conversation_summary"]
+
+        updated_history = cap_chat_history(updated_history)
+
         graph.update_state(
             config,
             {
                 "chat_history": updated_history,
+                "conversation_summary": result.get("conversation_summary", ""),
             },
         )

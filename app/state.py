@@ -6,6 +6,7 @@ class ConversationState(TypedDict):
     user_query: str
 
     chat_history: List[Dict[str, str]]
+    conversation_summary: str
 
     query_type: Optional[str]
     standalone_query: Optional[str]
@@ -13,6 +14,9 @@ class ConversationState(TypedDict):
     intent_history: List[Dict[str, Any]]
     intent_confirmation_needed: bool
     intent_confirmation_question: Optional[str]
+    pending_confirmation: bool
+    pending_intent: Optional[Dict[str, Any]]
+    confirmation_response: Optional[bool]
 
     tasks: List[Dict[str, Any]]
     response_mode: Optional[str]
@@ -20,6 +24,7 @@ class ConversationState(TypedDict):
     task_results: List[Dict[str, Any]]
 
     final_response: Optional[str]
+    recommended_chart: Optional[Dict[str, Any]]
 
     clarification_needed: bool
     clarification_question: Optional[str]

@@ -40,7 +40,24 @@ def extract_intent(state: ConversationState):
     history = list(state.get("intent_history", []))
     history.append(intent.model_dump())
 
+    intent_data = intent.model_dump()
+
+    needs_confirmation = False
+    confirmation_question = None
+
+    if not intent_data.get("metrics") or not intent_data.get("geographies"):
+        needs_confirmation = True
+        summary = intent_data.get("intent_type", "request")
+        confirmation_question = (
+            f"I understood that you want to {summary}. Is that correct?"
+        )
+
     return {
-        "current_intent": intent.model_dump(),
+        "current_intent": intent_data,
         "intent_history": history,
+        "intent_confirmation_needed": needs_confirmation,
+        "intent_confirmation_question": confirmation_question,
+        "pending_confirmation": needs_confirmation,
+        "pending_intent": intent_data if needs_confirmation else None,
+        "confirmation_response": None,
     }

@@ -1,9 +1,10 @@
-from app.llm import llm
+from app.llm import get_llm
 from app.schemas import ExecutionPlan
 from app.state import ConversationState
 
 
-task_planner = llm.with_structured_output(ExecutionPlan)
+def get_task_planner():
+    return get_llm().with_structured_output(ExecutionPlan)
 
 
 def create_task_plan(state: ConversationState) -> dict:
@@ -36,7 +37,7 @@ Rules:
 - Do not answer the statistical question.
 """
 
-    plan = task_planner.invoke(prompt)
+    plan = get_task_planner().invoke(prompt)
 
     tasks = [task.model_dump() for task in plan.tasks]
 

@@ -1,4 +1,6 @@
+
 from app.graph import graph
+print("✅ Imported graph")
 
 
 SESSION_ID = "demo-session"
@@ -140,6 +142,7 @@ def print_node_update(node_name: str, node_update: dict) -> None:
 
 
 if __name__ == "__main__":
+    print("✅ Starting main")
     config = {
         "configurable": {
             "thread_id": SESSION_ID,
@@ -149,6 +152,7 @@ if __name__ == "__main__":
     print("StatsUSA conversational scaffold")
     print("Type 'exit' or 'quit' to stop.\n")
 
+    print("✅ Entering chat loop")
     while True:
         user_query = input("You: ").strip()
 

@@ -1,10 +1,11 @@
 import time
-from app.llm import llm
+from app.llm import get_llm
 from app.schemas import QueryAnalysis
 from app.state import ConversationState
 
 
-query_analyzer = llm.with_structured_output(QueryAnalysis)
+def get_query_analyzer():
+    return get_llm().with_structured_output(QueryAnalysis)
 
 
 def analyze_query(state: ConversationState) -> dict:
@@ -41,7 +42,7 @@ Rules:
 """
 
     start = time.time()
-    analysis = query_analyzer.invoke(prompt)
+    analysis = get_query_analyzer().invoke(prompt)
     elapsed = time.time() - start
     print(f"⏱️ analyze_query: {elapsed:.2f}s")
 

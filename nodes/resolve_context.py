@@ -1,6 +1,6 @@
 
 
-from app.llm import llm
+from app.llm import get_llm
 from app.state import ConversationState
 
 
@@ -38,7 +38,7 @@ Rules:
 - Return ONLY the rewritten standalone query.
 """
 
-    response = llm.invoke(prompt)
+    response = get_llm().invoke(prompt)
 
     return {
         "standalone_query": response.content.strip()

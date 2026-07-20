@@ -1,9 +1,11 @@
-from app.llm import llm
+from app.llm import get_llm
 from app.schemas import StructuredIntent
 from app.state import ConversationState
 
 
-intent_llm = llm.with_structured_output(StructuredIntent)
+
+def get_intent_llm():
+    return get_llm().with_structured_output(StructuredIntent)
 
 
 PROMPT = """
@@ -28,7 +30,7 @@ Do not invent metrics or locations.
 def extract_intent(state: ConversationState):
     query = state.get("standalone_query") or state["user_query"]
 
-    intent = intent_llm.invoke(
+    intent = get_intent_llm().invoke(
         [
             ("system", PROMPT),
             ("human", query),

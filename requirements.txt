@@ -1,12 +1,11 @@
-langgraph
-langgraph-checkpoint-sqlite
-langchain
-langchain-google-genai
+langgraph==0.2.74
+langgraph-checkpoint-sqlite==2.0.10
 
-python-dotenv
-pydantic
+langchain==0.3.27
+langchain-google-genai==2.1.10
 
-fastapi
-uvicorn
+python-dotenv==1.1.1
+pydantic==2.11.7
 
-rich
+fastapi==0.116.1
+uvicorn==0.35.0

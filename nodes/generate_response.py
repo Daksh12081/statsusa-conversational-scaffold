@@ -1,4 +1,4 @@
-from app.llm import llm
+from app.llm import get_llm
 from app.state import ConversationState
 
 
@@ -30,7 +30,7 @@ Rules:
 - Keep the answer concise and conversational.
 """
 
-    response = llm.invoke(prompt)
+    response = get_llm().invoke(prompt)
 
     return {
         "final_response": response.content.strip(),

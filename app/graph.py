@@ -5,7 +5,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
 
 from app.state import ConversationState
-from nodes import analyze_query, create_task_plan
+from nodes import analyze_query, extract_intent, create_task_plan
 from nodes.clarification import handle_clarification
 from nodes.resolve_context import resolve_context
 from nodes.execute_tasks import execute_tasks
@@ -26,6 +26,7 @@ builder = StateGraph(ConversationState)
 builder.add_node("analyze_query", analyze_query)
 builder.add_node("clarification", handle_clarification)
 builder.add_node("resolve_context", resolve_context)
+builder.add_node("extract_intent", extract_intent)
 builder.add_node("create_task_plan", create_task_plan)
 builder.add_node("execute_tasks", execute_tasks)
 builder.add_node("generate_response", generate_response)
@@ -42,7 +43,8 @@ builder.add_conditional_edges(
 )
 
 builder.add_edge("clarification", END)
-builder.add_edge("resolve_context", "create_task_plan")
+builder.add_edge("resolve_context", "extract_intent")
+builder.add_edge("extract_intent", "create_task_plan")
 builder.add_edge("create_task_plan", "execute_tasks")
 builder.add_edge("execute_tasks", "generate_response")
 builder.add_edge("generate_response", END)

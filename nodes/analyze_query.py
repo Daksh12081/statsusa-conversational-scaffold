@@ -1,5 +1,4 @@
-
-
+import time
 from app.llm import llm
 from app.schemas import QueryAnalysis
 from app.state import ConversationState
@@ -41,7 +40,10 @@ Rules:
 - Do not answer the statistical question.
 """
 
+    start = time.time()
     analysis = query_analyzer.invoke(prompt)
+    elapsed = time.time() - start
+    print(f"⏱️ analyze_query: {elapsed:.2f}s")
 
     return {
         "query_type": analysis.query_type,

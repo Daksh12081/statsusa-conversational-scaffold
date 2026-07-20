@@ -9,6 +9,10 @@ class ConversationState(TypedDict):
 
     query_type: Optional[str]
     standalone_query: Optional[str]
+    current_intent: Optional[Dict[str, Any]]
+    intent_history: List[Dict[str, Any]]
+    intent_confirmation_needed: bool
+    intent_confirmation_question: Optional[str]
 
     tasks: List[Dict[str, Any]]
     response_mode: Optional[str]

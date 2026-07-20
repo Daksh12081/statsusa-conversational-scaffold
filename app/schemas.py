@@ -1,7 +1,6 @@
 from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
-
 class QueryAnalysis(BaseModel):
     query_type: Literal[
         "simple",
@@ -14,6 +13,29 @@ class QueryAnalysis(BaseModel):
     standalone_query: Optional[str] = None
     needs_clarification: bool = False
     clarification_question: Optional[str] = None
+
+
+class StructuredIntent(BaseModel):
+    intent_type: Literal[
+        "retrieve",
+        "compare",
+        "rank",
+        "trend",
+        "combine",
+        "clarify",
+    ]
+
+    domains: List[Literal["insurance", "housing", "death"]] = Field(
+        default_factory=list
+    )
+    metrics: List[str] = Field(default_factory=list)
+    geographies: List[str] = Field(default_factory=list)
+    years: List[int] = Field(default_factory=list)
+
+    visualization_requested: bool = False
+    requested_chart_type: Optional[str] = None
+
+    confirmed: bool = False
 
 
 class Task(BaseModel):

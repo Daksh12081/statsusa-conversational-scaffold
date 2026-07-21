@@ -2,10 +2,6 @@ from app.llm import get_llm
 from app.state import ConversationState
 
 
-def _user_messages(history: list[dict]) -> list[str]:
-    return [m.get("content", "") for m in history if m.get("role") == "user"]
-
-
 def _extract_last_state(history: list[dict]):
     states = [
         "Texas",
@@ -57,45 +53,53 @@ Rules:
     return response.content.strip()
 
 
+def _answer_conversation_question(
+    question: str,
+    history: list[dict],
+    summary: str,
+) -> str:
+    history_text = "\n".join(
+        f"{m.get('role', 'unknown')}: {m.get('content', '')}"
+        for m in history
+    )
+
+    prompt = f"""
+You answer questions about an ongoing conversation.
+
+Conversation summary:
+{summary or 'No long-term summary available.'}
+
+Recent conversation:
+{history_text or 'No recent conversation.'}
+
+User question:
+{question}
+
+Instructions:
+- Answer only using the summary and recent conversation.
+- Prefer the recent conversation if it conflicts with the summary.
+- If the answer cannot be determined, say so clearly.
+- Be concise.
+"""
+
+    response = get_llm().invoke(prompt)
+    return response.content.strip()
+
+
 def handle_conversation(state: ConversationState):
     history = state.get("chat_history", []) or []
     summary = state.get("conversation_summary", "") or ""
     intent = state.get("current_intent", {}) or {}
     query_type = intent.get("conversation_query")
 
-    user_history = _user_messages(history)
-
-    if query_type == "last_question":
-        response = user_history[-1] if user_history else "No previous user question is available."
-
-    elif query_type == "summary":
+    if query_type == "summary":
         if history or summary:
             response = _generate_conversation_summary(history, summary)
         else:
             response = "There is no conversation to summarize yet."
-
-    elif query_type in {"first_topic", "previous_geography"}:
-        state_name = None
-        for message in history:
-            state_name = _extract_last_state([message])
-            if state_name:
-                break
-        response = (
-            f"The first state discussed was {state_name}."
-            if state_name
-            else "I couldn't determine the first state we discussed."
-        )
-
-    elif query_type == "last_topic":
-        state_name = _extract_last_state(history)
-        response = (
-            f"The most recently discussed state was {state_name}."
-            if state_name
-            else "I couldn't determine the latest topic."
-        )
-
     else:
-        response = "I couldn't determine which part of our conversation you were referring to."
+        question = state.get("standalone_query") or state.get("user_query") or ""
+        response = _answer_conversation_question(question, history, summary)
 
     return {
         "tasks": [],

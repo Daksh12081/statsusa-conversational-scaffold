@@ -23,6 +23,8 @@ class StructuredIntent(BaseModel):
         "trend",
         "combine",
         "clarify",
+        "metadata",
+        "conversation",
     ]
 
     domains: List[Literal["insurance", "housing", "death"]] = Field(
@@ -36,6 +38,30 @@ class StructuredIntent(BaseModel):
     requested_chart_type: Optional[str] = None
 
     confirmed: bool = False
+
+    metadata_category: Optional[
+        Literal[
+            "available_domains",
+            "available_metrics",
+            "available_geographies",
+            "available_years",
+            "capabilities",
+        ]
+    ] = None
+
+    metadata_query: Optional[str] = None
+
+    conversation_query: Optional[
+        Literal[
+            "first_topic",
+            "last_topic",
+            "last_question",
+            "summary",
+            "previous_metric",
+            "previous_geography",
+            "previous_year",
+        ]
+    ] = None
 
 
 class Task(BaseModel):

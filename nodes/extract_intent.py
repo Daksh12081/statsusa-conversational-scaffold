@@ -14,13 +14,40 @@ You are extracting the user's intent for a conversational analytics assistant.
 Return ONLY a StructuredIntent.
 
 Determine:
-- intent_type (retrieve, compare, rank, trend, combine, clarify)
+- intent_type (retrieve, compare, rank, trend, combine, clarify, metadata, conversation)
 - domains (insurance, housing, death)
 - metrics
 - geographies
 - years
 - whether the user explicitly requested a visualization
 - requested chart type if mentioned
+- metadata_category when intent_type is metadata
+- metadata_query when intent_type is metadata
+- conversation_query when intent_type is conversation
+
+Use intent_type="metadata" for questions about what data, domains, metrics, geographies, years, or capabilities are supported.
+For metadata queries, choose one metadata_category from:
+- available_domains
+- available_metrics
+- available_geographies
+- available_years
+- capabilities
+For metadata queries, metrics and geographies may be empty.
+
+Use intent_type="conversation" for questions about the conversation itself, such as:
+- what was discussed first or last
+- what the user's previous question was
+- which metric, geography, or year was previously discussed
+- requests to summarize the conversation
+For conversation queries, choose one conversation_query from:
+- first_topic
+- last_topic
+- last_question
+- summary
+- previous_metric
+- previous_geography
+- previous_year
+For conversation queries, domains, metrics, geographies, and years may be empty.
 
 If no chart is requested, visualization_requested should be false.
 Do not invent metrics or locations.
@@ -45,12 +72,13 @@ def extract_intent(state: ConversationState):
     needs_confirmation = False
     confirmation_question = None
 
-    if not intent_data.get("metrics") or not intent_data.get("geographies"):
-        needs_confirmation = True
-        summary = intent_data.get("intent_type", "request")
-        confirmation_question = (
-            f"I understood that you want to {summary}. Is that correct?"
-        )
+    if intent_data.get("intent_type") not in {"metadata", "conversation"}:
+        if not intent_data.get("metrics") or not intent_data.get("geographies"):
+            needs_confirmation = True
+            summary = intent_data.get("intent_type", "request")
+            confirmation_question = (
+                f"I understood that you want to {summary}. Is that correct?"
+            )
 
     return {
         "current_intent": intent_data,

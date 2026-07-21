@@ -1,4 +1,5 @@
 from app.graph import graph
+from nodes.summarize_memory import summarize_memory
 print("✅ Imported graph")
 
 
@@ -269,6 +270,7 @@ if __name__ == "__main__":
         print(f"Tasks: {result.get('tasks')}")
         print(f"Task Results: {result.get('task_results')}")
         print(f"Response Mode: {result.get('response_mode')}")
+        print(f"Graph Spec: {result.get('graph_spec')}")
         print(f"Clarification Needed: {result.get('clarification_needed')}")
         print(f"Clarification Question: {result.get('clarification_question')}")
         print(f"Final Response: {result.get('final_response')}\n")
@@ -281,12 +283,11 @@ if __name__ == "__main__":
         needs_summary = should_summarize(updated_history)
 
         if needs_summary:
-            summary_update = graph.invoke(
+            summary_update = summarize_memory(
                 {
                     "chat_history": updated_history,
                     "conversation_summary": result.get("conversation_summary", ""),
-                },
-                config=config,
+                }
             )
 
             if summary_update.get("conversation_summary"):

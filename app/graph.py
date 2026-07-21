@@ -14,6 +14,8 @@ from nodes.summarize_memory import summarize_memory
 from nodes.confirm_intent import confirm_intent
 from nodes.handle_metadata import handle_metadata
 from nodes.handle_conversation import handle_conversation
+from nodes.recommend_graph import recommend_graph
+from nodes.graph_spec import build_graph_spec
 
 
 def route_after_analysis(
@@ -72,6 +74,8 @@ builder.add_node("handle_metadata", handle_metadata)
 builder.add_node("handle_conversation", handle_conversation)
 builder.add_node("create_task_plan", create_task_plan)
 builder.add_node("execute_tasks", execute_tasks)
+builder.add_node("recommend_graph", recommend_graph)
+builder.add_node("build_graph_spec", build_graph_spec)
 builder.add_node("generate_response", generate_response)
 builder.add_node("summarize_memory", summarize_memory)
 
@@ -111,7 +115,9 @@ builder.add_edge("confirm_intent", END)
 builder.add_edge("handle_metadata", END)
 builder.add_edge("handle_conversation", END)
 builder.add_edge("create_task_plan", "execute_tasks")
-builder.add_edge("execute_tasks", "generate_response")
+builder.add_edge("execute_tasks", "recommend_graph")
+builder.add_edge("recommend_graph", "build_graph_spec")
+builder.add_edge("build_graph_spec", "generate_response")
 builder.add_edge("generate_response", "summarize_memory")
 builder.add_edge("summarize_memory", END)
 

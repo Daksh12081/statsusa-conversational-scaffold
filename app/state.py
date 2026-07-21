@@ -23,6 +23,12 @@ class ConversationState(TypedDict):
 
     task_results: List[Dict[str, Any]]
 
+    graph_needed: bool
+    graph_type: Optional[str]
+    graph_title: Optional[str]
+    graph_reason: Optional[str]
+    graph_spec: Optional[Dict[str, Any]]
+
     final_response: Optional[str]
     recommended_chart: Optional[Dict[str, Any]]
 

@@ -33,7 +33,7 @@ Reason: {graph_reason}
 Rules:
 - Use only the verified task results provided above.
 - Do not invent or estimate missing values.
-- If a result has found=false, clearly state that the requested mock data was unavailable.
+- If a result has found=false, clearly state that the requested data was unavailable.
 - For response_mode="single", give one concise answer.
 - For response_mode="compare", clearly compare the values.
 - For response_mode="combine", explain how the results relate.

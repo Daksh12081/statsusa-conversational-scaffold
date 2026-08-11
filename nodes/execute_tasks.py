@@ -1,7 +1,7 @@
 import re
 
 from app.state import ConversationState
-from services.data_service import data_service
+from services.data_service import CLICKHOUSE_DOMAINS, data_service
 
 
 STATE_PATTERN = re.compile(
@@ -10,6 +10,11 @@ STATE_PATTERN = re.compile(
 )
 YEAR_PATTERN = re.compile(r"(20\d{2})")
 TOP_N_PATTERN = re.compile(r"top\s+(\d+)|five|four|three|two", re.IGNORECASE)
+
+# insurance is still mock data and only exists for 2022; death and housing are
+# backed by live ClickHouse and resolve their own latest year when none is
+# given (see DataService), so they deliberately have no hardcoded default here.
+DEFAULT_MOCK_YEAR = 2022
 
 
 def extract_states(query: str) -> list[str]:
@@ -72,24 +77,38 @@ def extract_states_from_dependencies(dependency_results: list[dict]) -> list[str
     return list(dict.fromkeys(states))
 
 
+def resolve_display_year(year: int | None, items: list[dict]) -> int | None:
+    """Best-effort year to report when none was requested upfront.
+
+    death/housing tasks may run with year=None and let DataService resolve
+    the latest available year per item; if every returned item agrees on a
+    year, surface that instead of leaving the result's year as None.
+    """
+    if year is not None:
+        return year
+
+    resolved_years = {item.get("year") for item in items if item.get("year") is not None}
+    if len(resolved_years) == 1:
+        return resolved_years.pop()
+
+    return None
+
+
 def execute_ranked_task(
     task_id: str,
     domain: str,
     query: str,
-    year: int,
+    year: int | None,
     top_n: int,
+    intent: dict | None = None,
 ) -> dict:
     ranked_items = data_service.rank(
         domain=domain,
         year=year,
         top_n=top_n,
+        query=query,
+        intent=intent,
     )
-
-    metric_name = {
-        "insurance": "uninsured_rate",
-        "housing": "median_home_price",
-        "death": "death_rate",
-    }[domain]
 
     return {
         "task_id": task_id,
@@ -97,7 +116,7 @@ def execute_ranked_task(
         "result": {
             "found": bool(ranked_items),
             "domain": domain,
-            "year": year,
+            "year": resolve_display_year(year, ranked_items),
             "items": ranked_items,
         },
     }
@@ -106,6 +125,7 @@ def execute_ranked_task(
 def execute_tasks(state: ConversationState) -> dict:
     results = []
     completed_results = {}
+    intent = state.get("current_intent")
 
     for task in state.get("tasks", []):
         task_id = task["task_id"]
@@ -128,8 +148,8 @@ def execute_tasks(state: ConversationState) -> dict:
                     year = dependency_year
                     break
 
-        if year is None:
-            year = 2022
+        if year is None and domain not in CLICKHOUSE_DOMAINS:
+            year = DEFAULT_MOCK_YEAR
 
         if top_n is not None and not states:
             task_result = execute_ranked_task(
@@ -138,6 +158,7 @@ def execute_tasks(state: ConversationState) -> dict:
                 query=query,
                 year=year,
                 top_n=top_n,
+                intent=intent,
             )
             results.append(task_result)
             completed_results[task_id] = task_result
@@ -154,7 +175,13 @@ def execute_tasks(state: ConversationState) -> dict:
             continue
 
         data_items = [
-            data_service.execute(domain, state_name, year)
+            data_service.execute(
+                domain=domain,
+                state=state_name,
+                year=year,
+                query=query,
+                intent=intent,
+            )
             for state_name in states
         ]
 
@@ -164,7 +191,7 @@ def execute_tasks(state: ConversationState) -> dict:
             "result": {
                 "found": any(item.get("found") for item in data_items),
                 "domain": domain,
-                "year": year,
+                "year": resolve_display_year(year, data_items),
                 "items": data_items,
             },
         }

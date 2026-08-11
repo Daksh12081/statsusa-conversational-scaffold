@@ -27,6 +27,7 @@ Rules:
 - Use one task when the request belongs to one domain.
 - Split the request into multiple tasks when it contains multiple domains.
 - Each task query must be complete and executable on its own.
+- Preserve specific details in each task query exactly as stated by the user: metric (e.g. crude rate, age adjusted rate, deaths, median listing price), state, and year.
 - Use depends_on only when a task requires the result of an earlier task.
 - For dependent tasks, include the exact earlier task_id inside depends_on.
 - Example: if task_2 requires the output of task_1, set depends_on=["task_1"].

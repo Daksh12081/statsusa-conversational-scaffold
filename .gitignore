@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 .env
-statsusa_memory.db
 .DS_Store
 .vscode/
+
+# SQLite conversation memory
+statsusa_memory.db
+statsusa_memory.db-shm
+statsusa_memory.db-wal

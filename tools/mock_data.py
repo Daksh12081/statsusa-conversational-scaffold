@@ -6,26 +6,10 @@ MOCK_INSURANCE = {
 }
 
 
-MOCK_HOUSING = {
-    ("Texas", 2022): {"median_home_price": 345000},
-    ("California", 2022): {"median_home_price": 786000},
-    ("Florida", 2022): {"median_home_price": 410000},
-    ("New York", 2022): {"median_home_price": 462000},
-}
-
-
-MOCK_DEATH = {
-    ("Texas", 2022): {"death_rate": 8.1},
-    ("California", 2022): {"death_rate": 6.4},
-    ("Florida", 2022): {"death_rate": 10.2},
-    ("New York", 2022): {"death_rate": 7.3},
-}
-
-
+# housing and death now query ClickHouse directly (see services/data_service.py).
+# insurance stays on mock data until its ClickHouse table is populated.
 DATASETS = {
     "insurance": MOCK_INSURANCE,
-    "housing": MOCK_HOUSING,
-    "death": MOCK_DEATH,
 }
 
 

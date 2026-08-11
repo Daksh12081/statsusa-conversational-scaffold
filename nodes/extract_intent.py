@@ -25,6 +25,9 @@ Determine:
 - metadata_query when intent_type is metadata
 - conversation_query when intent_type is conversation
 
+For domain="death", metrics may include: "deaths", "crude rate" (or "crude death rate"), "age adjusted rate" (or "age-adjusted death rate"), "population".
+For domain="housing", metrics may include: "median listing price" (also referred to as "median home price", "home price", "housing price", or "home value"), "average listing price" (also referred to as "average home price"), "days on market", "listing count".
+
 Use intent_type="metadata" for questions about what data, domains, metrics, geographies, years, or capabilities are supported.
 For metadata queries, choose one metadata_category from:
 - available_domains

@@ -176,6 +176,8 @@ def print_node_update(node_name: str, node_update: dict) -> None:
                     f"    Retrieved {result.get('domain')} data for "
                     f"{result.get('state')} ({result.get('year')})"
                 )
+                if result.get("metric") and result.get("value") is not None:
+                    print(f"    {result.get('metric')}: {result.get('value')}")
             elif result.get("items"):
                 print(f"    Retrieved {len(result['items'])} result item(s)")
         return

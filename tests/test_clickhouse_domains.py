@@ -257,6 +257,135 @@ class HousingQueryTests(unittest.TestCase):
         self.assertEqual(result["value"], 410000.0)
 
 
+class InsuranceQueryTests(unittest.TestCase):
+    """Insurance now queries ClickHouse's health_insurance table (migration complete)."""
+
+    @patch("services.data_service.clickhouse_service")
+    def test_uninsured_rate_texas_2022(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [{"value": "17.6"}]
+
+        result = data_service.execute(
+            domain="insurance",
+            state="Texas",
+            year=2022,
+            query="What's the uninsured rate in Texas in 2022?",
+        )
+
+        sql, params = mock_clickhouse.query.call_args[0]
+        self.assertIn("y2022", sql)
+        self.assertEqual(params["state"], "Texas")
+        self.assertEqual(params["category"], "Percent Uninsured")
+        self.assertEqual(params["parent_category"], "Uninsured Population (Percent) by Age")
+
+        self.assertEqual(
+            result,
+            {
+                "found": True,
+                "domain": "insurance",
+                "state": "Texas",
+                "year": 2022,
+                "metric": "Percent Uninsured",
+                "category": "Percent Uninsured",
+                "value": 17.6,
+                "units": "percent",
+                "uninsured_rate": 17.6,
+            },
+        )
+
+    @patch("services.data_service.clickhouse_service")
+    def test_insured_population_retrieval(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [{"value": "23708399"}]
+
+        result = data_service.execute(
+            domain="insurance",
+            state="Texas",
+            year=2022,
+            query="Show insured population in Texas in 2022",
+        )
+
+        _, params = mock_clickhouse.query.call_args[0]
+        self.assertEqual(params["category"], "Insured")
+        self.assertEqual(result["value"], 23708399)
+        self.assertEqual(result["units"], "number")
+        self.assertNotIn("uninsured_rate", result)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_percent_insured_retrieval(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [{"value": "92.9"}]
+
+        result = data_service.execute(
+            domain="insurance",
+            state="California",
+            year=2022,
+            query="What percent of California is insured in 2022?",
+        )
+
+        _, params = mock_clickhouse.query.call_args[0]
+        self.assertEqual(params["category"], "Percent Insured")
+        self.assertEqual(result["metric"], "Percent Insured")
+        self.assertEqual(result["value"], 92.9)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_rank_top_5_states_by_uninsured_rate_2022(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [
+            {"state": name, "value": str(value)}
+            for name, value in [
+                ("Texas", 17.6),
+                ("Oklahoma", 13.9),
+                ("Georgia", 12.9),
+                ("Florida", 12.3),
+                ("Mississippi", 11.8),
+            ]
+        ]
+
+        results = data_service.rank(
+            domain="insurance",
+            year=2022,
+            top_n=5,
+            query="Top 5 states by uninsured rate in 2022",
+        )
+
+        sql, params = mock_clickhouse.query.call_args[0]
+        self.assertIn("y2022", sql)
+        self.assertIn("state != 'US'", sql)
+        self.assertEqual(params["top_n"], 5)
+        self.assertEqual(params["category"], "Percent Uninsured")
+        self.assertEqual(len(results), 5)
+        self.assertEqual(results[0]["state"], "Texas")
+        self.assertTrue(all("uninsured_rate" in item for item in results))
+
+    @patch("services.data_service.clickhouse_service")
+    def test_no_year_resolves_latest_available_year_dynamically(self, mock_clickhouse):
+        row = death_row({2024: "17.1", 2023: "17.4", 2022: "17.6"})
+        mock_clickhouse.query.return_value = [row]
+
+        result = data_service.execute(
+            domain="insurance", state="Texas", year=None, query="uninsured rate in Texas"
+        )
+
+        self.assertEqual(result["year"], 2024)
+        self.assertEqual(result["value"], 17.1)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_clickhouse_error_reported_distinctly_from_no_data(self, mock_clickhouse):
+        mock_clickhouse.query.side_effect = ClickHouseQueryError("connection refused")
+
+        result = data_service.execute(domain="insurance", state="Texas", year=2022)
+
+        self.assertFalse(result["found"])
+        self.assertIn("unavailable", result["message"])
+
+    @unittest.skip(
+        "Legislative/congressional-district geography is confirmed present in "
+        "health_insurance (fips_val_type='CLD'/'SLD') but there is no natural-language "
+        "extraction for it anywhere in the current planner (execute_tasks.py only "
+        "extracts state names); wiring that up was scoped out of this migration per "
+        "the approved Phase 1 report and left as documented future work."
+    )
+    def test_legislative_district_geography_query(self):
+        pass
+
+
 class ExecuteTasksCompareTests(unittest.TestCase):
     """'Compare the death rate in Texas and California in 2020'."""
 
@@ -318,6 +447,71 @@ class ExecuteTasksCompareTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 2)
         self.assertTrue(result["found"])
 
+    @patch("nodes.execute_tasks.data_service")
+    def test_compare_insurance_task_queries_both_states(self, mock_data_service):
+        mock_data_service.execute.side_effect = [
+            {"found": True, "domain": "insurance", "state": "Texas", "year": 2022, "metric": "Percent Uninsured", "value": 17.6, "units": "percent", "uninsured_rate": 17.6},
+            {"found": True, "domain": "insurance", "state": "California", "year": 2022, "metric": "Percent Uninsured", "value": 6.2, "units": "percent", "uninsured_rate": 6.2},
+        ]
+
+        state = {
+            "tasks": [
+                {
+                    "task_id": "task_1",
+                    "domain": "insurance",
+                    "query": "Compare the uninsured rate in Texas and California in 2022",
+                    "depends_on": [],
+                }
+            ],
+            "current_intent": {"metrics": ["uninsured rate"]},
+            "response_mode": "compare",
+        }
+
+        output = execute_tasks(state)
+        result = output["task_results"][0]["result"]
+
+        self.assertEqual(mock_data_service.execute.call_count, 2)
+        called_states = {call.kwargs["state"] for call in mock_data_service.execute.call_args_list}
+        self.assertEqual(called_states, {"Texas", "California"})
+        self.assertEqual(len(result["items"]), 2)
+        self.assertTrue(result["found"])
+
+    @patch("nodes.execute_tasks.data_service")
+    def test_multi_domain_query_insurance_and_housing(self, mock_data_service):
+        """A multi-task plan spanning insurance + housing (e.g. response_mode='separate')."""
+        mock_data_service.execute.side_effect = [
+            {"found": True, "domain": "insurance", "state": "Texas", "year": 2022, "metric": "Percent Uninsured", "value": 17.6, "units": "percent", "uninsured_rate": 17.6},
+            {"found": True, "domain": "housing", "state": "Texas", "year": 2022, "metric": "median_listing_price", "value": 345000.0, "median_home_price": 345000.0},
+        ]
+
+        state = {
+            "tasks": [
+                {
+                    "task_id": "task_1",
+                    "domain": "insurance",
+                    "query": "Show the uninsured rate in Texas in 2022",
+                    "depends_on": [],
+                },
+                {
+                    "task_id": "task_2",
+                    "domain": "housing",
+                    "query": "Show the median home price in Texas in 2022",
+                    "depends_on": [],
+                },
+            ],
+            "current_intent": {"metrics": ["uninsured rate", "median home price"]},
+            "response_mode": "separate",
+        }
+
+        output = execute_tasks(state)
+        task_results = output["task_results"]
+
+        self.assertEqual(len(task_results), 2)
+        self.assertEqual(task_results[0]["result"]["domain"], "insurance")
+        self.assertEqual(task_results[1]["result"]["domain"], "housing")
+        called_domains = [call.kwargs["domain"] for call in mock_data_service.execute.call_args_list]
+        self.assertEqual(called_domains, ["insurance", "housing"])
+
 
 class GraphSpecTests(unittest.TestCase):
     """graph_spec should use the normalized value/metric shape for death and housing."""
@@ -377,6 +571,57 @@ class GraphSpecTests(unittest.TestCase):
     def test_no_graph_needed_returns_none(self):
         output = build_graph_spec({"graph_needed": False})
         self.assertIsNone(output["graph_spec"])
+
+    def test_insurance_ranked_items_use_backward_compat_field(self):
+        state = {
+            "graph_needed": True,
+            "graph_type": "horizontal_bar",
+            "graph_title": "Uninsured Rate (2022)",
+            "task_results": [
+                {
+                    "result": {
+                        "items": [
+                            {"state": "Texas", "year": 2022, "metric": "Percent Uninsured", "value": 17.6, "uninsured_rate": 17.6},
+                            {"state": "Oklahoma", "year": 2022, "metric": "Percent Uninsured", "value": 13.9, "uninsured_rate": 13.9},
+                        ]
+                    }
+                }
+            ],
+        }
+
+        output = build_graph_spec(state)
+
+        self.assertEqual(
+            output["graph_spec"]["data"],
+            [
+                {"State": "Texas", "Value": 17.6, "Metric": "Uninsured Rate"},
+                {"State": "Oklahoma", "Value": 13.9, "Metric": "Uninsured Rate"},
+            ],
+        )
+
+    def test_insurance_non_uninsured_metric_uses_generic_value(self):
+        state = {
+            "graph_needed": True,
+            "graph_type": "bar",
+            "graph_title": "Insured Population (2022)",
+            "task_results": [
+                {
+                    "result": {
+                        "found": True,
+                        "state": "Texas",
+                        "metric": "Insured",
+                        "value": 23708399.0,
+                    }
+                }
+            ],
+        }
+
+        output = build_graph_spec(state)
+
+        self.assertEqual(
+            output["graph_spec"]["data"],
+            [{"State": "Texas", "Value": 23708399.0, "Metric": "Insured"}],
+        )
 
 
 if __name__ == "__main__":

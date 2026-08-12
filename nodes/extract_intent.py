@@ -27,6 +27,7 @@ Determine:
 
 For domain="death", metrics may include: "deaths", "crude rate" (or "crude death rate"), "age adjusted rate" (or "age-adjusted death rate"), "population".
 For domain="housing", metrics may include: "median listing price" (also referred to as "median home price", "home price", "housing price", or "home value"), "average listing price" (also referred to as "average home price"), "days on market", "listing count".
+For domain="insurance", metrics may include: "uninsured rate" (or "percent uninsured"), "insured rate" (or "percent insured"), "uninsured population", "insured population", "total population".
 
 Use intent_type="metadata" for questions about what data, domains, metrics, geographies, years, or capabilities are supported.
 For metadata queries, choose one metadata_category from:

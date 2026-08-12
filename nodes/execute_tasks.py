@@ -1,7 +1,7 @@
 import re
 
 from app.state import ConversationState
-from services.data_service import CLICKHOUSE_DOMAINS, data_service
+from services.data_service import data_service
 
 
 STATE_PATTERN = re.compile(
@@ -10,11 +10,6 @@ STATE_PATTERN = re.compile(
 )
 YEAR_PATTERN = re.compile(r"(20\d{2})")
 TOP_N_PATTERN = re.compile(r"top\s+(\d+)|five|four|three|two", re.IGNORECASE)
-
-# insurance is still mock data and only exists for 2022; death and housing are
-# backed by live ClickHouse and resolve their own latest year when none is
-# given (see DataService), so they deliberately have no hardcoded default here.
-DEFAULT_MOCK_YEAR = 2022
 
 
 def extract_states(query: str) -> list[str]:
@@ -147,9 +142,6 @@ def execute_tasks(state: ConversationState) -> dict:
                 if dependency_year is not None:
                     year = dependency_year
                     break
-
-        if year is None and domain not in CLICKHOUSE_DOMAINS:
-            year = DEFAULT_MOCK_YEAR
 
         if top_n is not None and not states:
             task_result = execute_ranked_task(

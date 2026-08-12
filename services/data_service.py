@@ -1,10 +1,9 @@
 import re
 
 from services.clickhouse_service import clickhouse_service, ClickHouseQueryError
-from tools.mock_data import DATASETS, lookup
 
 
-CLICKHOUSE_DOMAINS = {"death", "housing"}
+CLICKHOUSE_DOMAINS = {"death", "housing", "insurance"}
 
 DEATH_MIN_YEAR = 1999
 DEATH_MAX_YEAR = 2024
@@ -12,6 +11,28 @@ DEATH_YEAR_COLUMNS = [f"y{year}" for year in range(DEATH_MIN_YEAR, DEATH_MAX_YEA
 DEFAULT_DEATH_CATEGORY = "Crude Rate"
 
 DEFAULT_HOUSING_CATEGORY = "median_listing_price"
+
+INSURANCE_MIN_YEAR = 2012
+INSURANCE_MAX_YEAR = 2024
+INSURANCE_YEAR_COLUMNS = [f"y{year}" for year in range(INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR + 1)]
+DEFAULT_INSURANCE_CATEGORY = "Percent Uninsured"
+
+# coverage_category values map 1:1 to a parent_category "by Age" breakdown that
+# carries the state-total row (category_name='Total, all ages'). Verified against
+# live data: Insured + Uninsured = Total for every state, and the Percent
+# Uninsured value matches Uninsured/Total exactly.
+INSURANCE_CATEGORY_PARENT = {
+    "Total": "Population by Age",
+    "Insured": "Insured Population (Number) by Age",
+    "Uninsured": "Uninsured Population (Number) by Age",
+    "Percent Insured": "Insured Population (Percent) by Age",
+    "Percent Uninsured": "Uninsured Population (Percent) by Age",
+}
+
+# health_insurance stores both point estimates and their margins of error as
+# separate rows; without this filter a query could pick up MOE noise instead
+# of the actual estimate.
+INSURANCE_TOTAL_FILTER = "category_name = 'Total, all ages' AND data_type = 'Estimate'"
 
 # Every state/national-level row in both ClickHouse tables is identified by
 # fips_val_type='S'; area_name is the clean state name (full_state_name has
@@ -57,6 +78,28 @@ def resolve_housing_category(metrics: list[str] | None, query: str | None) -> st
     return DEFAULT_HOUSING_CATEGORY
 
 
+def resolve_insurance_category(metrics: list[str] | None, query: str | None) -> str:
+    text = " ".join([*(metrics or []), query or ""]).lower()
+
+    # "uninsured" contains "insured" as a substring, so every uninsured check
+    # must be resolved before its insured counterpart is even considered.
+    if "percent uninsured" in text or "uninsured rate" in text:
+        return "Percent Uninsured"
+    if "percent insured" in text or "insured rate" in text:
+        return "Percent Insured"
+    if "uninsured population" in text:
+        return "Uninsured"
+    if "insured population" in text:
+        return "Insured"
+    if "total population" in text:
+        return "Total"
+    if "uninsured" in text:
+        return "Percent Uninsured"
+    if "insured" in text:
+        return "Percent Insured"
+    return DEFAULT_INSURANCE_CATEGORY
+
+
 def _to_float(raw) -> float | None:
     if raw is None:
         return None
@@ -83,8 +126,7 @@ def _latest_valid_year(row: dict, min_year: int, max_year: int) -> tuple[int | N
 class DataService:
     """Backend abstraction layer.
 
-    death and housing are backed by live ClickHouse OLAP tables.
-    insurance still uses mock data (its ClickHouse table is empty).
+    death, housing, and insurance are all backed by live ClickHouse OLAP tables.
     """
 
     def execute(
@@ -95,14 +137,14 @@ class DataService:
         query: str | None = None,
         intent: dict | None = None,
     ) -> dict:
-        if domain not in CLICKHOUSE_DOMAINS:
-            return lookup(domain, state, year)
-
         try:
             if domain == "death":
                 return self._execute_death(state=state, year=year, query=query, intent=intent)
 
-            return self._execute_housing(state=state, year=year, query=query, intent=intent)
+            if domain == "housing":
+                return self._execute_housing(state=state, year=year, query=query, intent=intent)
+
+            return self._execute_insurance(state=state, year=year, query=query, intent=intent)
         except ClickHouseQueryError as exc:
             return self._not_found(domain, state, year, None, f"Data source unavailable: {exc}")
 
@@ -114,14 +156,14 @@ class DataService:
         query: str | None = None,
         intent: dict | None = None,
     ) -> list[dict]:
-        if domain not in CLICKHOUSE_DOMAINS:
-            return self._rank_mock(domain=domain, year=year, top_n=top_n)
-
         try:
             if domain == "death":
                 return self._rank_death(year=year, top_n=top_n, query=query, intent=intent)
 
-            return self._rank_housing(year=year, top_n=top_n, query=query, intent=intent)
+            if domain == "housing":
+                return self._rank_housing(year=year, top_n=top_n, query=query, intent=intent)
+
+            return self._rank_insurance(year=year, top_n=top_n, query=query, intent=intent)
         except ClickHouseQueryError:
             return []
 
@@ -335,28 +377,133 @@ class DataService:
         rows = clickhouse_service.query(sql, parameters)
         return rows[0]["latest_year"] if rows and rows[0].get("latest_year") else None
 
-    # -- mock (insurance only) -------------------------------------------
+    # -- insurance ---------------------------------------------------------
 
-    def _rank_mock(self, domain: str, year: int, top_n: int) -> list[dict]:
-        dataset = DATASETS.get(domain, {})
-        metric_name = {"insurance": "uninsured_rate"}[domain]
+    def _execute_insurance(
+        self,
+        state: str,
+        year: int | None,
+        query: str | None,
+        intent: dict | None,
+    ) -> dict:
+        metrics = (intent or {}).get("metrics") if intent else None
+        category = resolve_insurance_category(metrics=metrics, query=query)
+        parent_category = INSURANCE_CATEGORY_PARENT[category]
 
-        items = []
+        if year is not None:
+            try:
+                year = _validate_year(year, INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR)
+            except ValueError as exc:
+                return self._not_found("insurance", state, year, category, str(exc))
 
-        for (state_name, data_year), values in dataset.items():
-            if data_year != year:
-                continue
+            sql = f"""
+                SELECT y{year} AS value
+                FROM health_insurance
+                WHERE {STATE_LEVEL_FILTER}
+                  AND area_name = {{state:String}}
+                  AND coverage_category = {{category:String}}
+                  AND parent_category = {{parent_category:String}}
+                  AND {INSURANCE_TOTAL_FILTER}
+                LIMIT 1
+            """
+            rows = clickhouse_service.query(
+                sql, {"state": state, "category": category, "parent_category": parent_category}
+            )
+            value = _to_float(rows[0]["value"]) if rows else None
+        else:
+            sql = f"""
+                SELECT {", ".join(INSURANCE_YEAR_COLUMNS)}
+                FROM health_insurance
+                WHERE {STATE_LEVEL_FILTER}
+                  AND area_name = {{state:String}}
+                  AND coverage_category = {{category:String}}
+                  AND parent_category = {{parent_category:String}}
+                  AND {INSURANCE_TOTAL_FILTER}
+                LIMIT 1
+            """
+            rows = clickhouse_service.query(
+                sql, {"state": state, "category": category, "parent_category": parent_category}
+            )
+            year, value = _latest_valid_year(rows[0] if rows else {}, INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR)
 
-            items.append(
-                {
-                    "state": state_name,
-                    "year": data_year,
-                    metric_name: values[metric_name],
-                }
+        if value is None:
+            return self._not_found(
+                "insurance", state, year, category, f"No insurance data found for {state} ({year})."
             )
 
-        items.sort(key=lambda item: item[metric_name], reverse=True)
-        return items[:top_n]
+        result = {
+            "found": True,
+            "domain": "insurance",
+            "state": state,
+            "year": year,
+            "metric": category,
+            "category": category,
+            "value": value,
+            "units": "percent" if category in ("Percent Insured", "Percent Uninsured") else "number",
+        }
+
+        # Backward compatibility: graph_spec/frontend historically read
+        # uninsured_rate directly; keep populating it until they migrate to
+        # the normalized value/metric shape used across all domains.
+        if category == "Percent Uninsured":
+            result["uninsured_rate"] = value
+
+        return result
+
+    def _rank_insurance(
+        self,
+        year: int | None,
+        top_n: int,
+        query: str | None,
+        intent: dict | None,
+    ) -> list[dict]:
+        metrics = (intent or {}).get("metrics") if intent else None
+        category = resolve_insurance_category(metrics=metrics, query=query)
+        parent_category = INSURANCE_CATEGORY_PARENT[category]
+
+        if year is not None:
+            try:
+                year = _validate_year(year, INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR)
+            except ValueError:
+                return []
+        else:
+            sql = f"""
+                SELECT {", ".join(INSURANCE_YEAR_COLUMNS)}
+                FROM health_insurance
+                WHERE {STATE_LEVEL_FILTER} AND state = 'US'
+                  AND coverage_category = {{category:String}}
+                  AND parent_category = {{parent_category:String}}
+                  AND {INSURANCE_TOTAL_FILTER}
+                LIMIT 1
+            """
+            rows = clickhouse_service.query(
+                sql, {"category": category, "parent_category": parent_category}
+            )
+            year, _ = _latest_valid_year(rows[0] if rows else {}, INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR)
+            if year is None:
+                return []
+
+        column = f"y{year}"
+        sql = f"""
+            SELECT area_name AS state, {column} AS value
+            FROM health_insurance
+            WHERE {STATE_LEVEL_FILTER} AND state != 'US'
+              AND coverage_category = {{category:String}}
+              AND parent_category = {{parent_category:String}}
+              AND {INSURANCE_TOTAL_FILTER}
+            ORDER BY toFloat64OrNull({column}) DESC
+            LIMIT {{top_n:UInt32}}
+        """
+        rows = clickhouse_service.query(
+            sql, {"category": category, "parent_category": parent_category, "top_n": top_n}
+        )
+        items = self._to_ranked_items(rows, year, category)
+
+        if category == "Percent Uninsured":
+            for item in items:
+                item["uninsured_rate"] = item["value"]
+
+        return items
 
     # -- shared helpers ----------------------------------------------------
 

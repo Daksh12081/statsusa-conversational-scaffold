@@ -1,7 +1,6 @@
 import os
 from typing import Any
 
-import clickhouse_connect
 from dotenv import load_dotenv
 
 
@@ -24,6 +23,11 @@ class ClickHouseService:
 
     def _get_client(self):
         if self._client is None:
+            # Imported lazily so importing this module (and anything that
+            # transitively imports it, e.g. nodes/execute_tasks.py) doesn't
+            # pay clickhouse_connect's import cost until a query actually runs.
+            import clickhouse_connect
+
             self._client = clickhouse_connect.get_client(
                 host=os.getenv("CLICKHOUSE_HOST"),
                 port=int(os.getenv("CLICKHOUSE_PORT", "8123")),

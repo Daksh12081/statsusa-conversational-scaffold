@@ -6,13 +6,30 @@ SUPPORTED_DOMAINS = ["insurance", "housing", "death"]
 
 DEATH_METRICS = ["Deaths", "Crude Rate", "Age Adjusted Rate", "Population"]
 HOUSING_METRICS = ["Median Listing Price"]
-INSURANCE_MOCK_METRICS = ["uninsured rate"]
-
-INSURANCE_MOCK_GEOGRAPHIES = ["Texas", "California", "Florida", "New York"]
-INSURANCE_MOCK_YEARS = [2022]
+INSURANCE_METRICS = [
+    "uninsured rate",
+    "insured rate",
+    "uninsured population",
+    "insured population",
+    "total population",
+]
+INSURANCE_SUBGROUP_DIMENSIONS = [
+    "Age",
+    "Gender",
+    "Race & Ethnicity",
+    "Income",
+    "Employment Status",
+    "Citizenship Status",
+    "Disability Status",
+    "Educational Attainment",
+    "Living Arrangements",
+    "Poverty Status",
+]
 
 DEATH_MIN_YEAR = 1999
 DEATH_MAX_YEAR = 2024
+INSURANCE_MIN_YEAR = 2012
+INSURANCE_MAX_YEAR = 2024
 
 
 def _clickhouse_state_names(table: str) -> list[str]:
@@ -55,23 +72,24 @@ def handle_metadata(state: ConversationState):
             "Available metrics include: "
             f"death: {', '.join(DEATH_METRICS)}; "
             f"housing: {', '.join(HOUSING_METRICS)}; "
-            f"insurance (mock data): {', '.join(INSURANCE_MOCK_METRICS)}."
+            f"insurance: {', '.join(INSURANCE_METRICS)} "
+            f"(also breakable down by: {', '.join(INSURANCE_SUBGROUP_DIMENSIONS)})."
         )
 
     elif category == "available_geographies":
         death_states = _clickhouse_state_names("deaths_and_death_rate")
         housing_states = _clickhouse_state_names("housing_prices")
+        insurance_states = _clickhouse_state_names("health_insurance")
 
         parts = []
         if death_states:
             parts.append(f"death data covers {len(death_states)} states nationwide")
         if housing_states:
             parts.append(f"housing data covers {len(housing_states)} states nationwide")
-        parts.append(
-            "insurance mock data is available for: " + ", ".join(INSURANCE_MOCK_GEOGRAPHIES)
-        )
+        if insurance_states:
+            parts.append(f"insurance data covers {len(insurance_states)} states nationwide")
 
-        response = "; ".join(parts) + "."
+        response = "; ".join(parts) + "." if parts else "Geography data is currently unavailable."
 
     elif category == "available_years":
         housing_min, housing_max = _housing_year_range()
@@ -82,15 +100,13 @@ def handle_metadata(state: ConversationState):
         response = (
             f"Death data is available for {DEATH_MIN_YEAR}–{DEATH_MAX_YEAR}. "
             f"Housing data is available for {housing_range}. "
-            "Insurance mock data is available for: "
-            + ", ".join(str(year) for year in INSURANCE_MOCK_YEARS)
-            + "."
+            f"Insurance data is available for {INSURANCE_MIN_YEAR}–{INSURANCE_MAX_YEAR}."
         )
 
     else:
         response = (
-            "I currently support insurance (mock data), housing and death "
-            "(live ClickHouse data) datasets. "
+            "I currently support insurance, housing and death datasets, all backed by "
+            "live ClickHouse data. "
             "You can retrieve values, compare locations, rank results, "
             "analyse trends and request visualizations."
         )

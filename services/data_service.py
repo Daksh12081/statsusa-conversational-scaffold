@@ -17,10 +17,6 @@ INSURANCE_MAX_YEAR = 2024
 INSURANCE_YEAR_COLUMNS = [f"y{year}" for year in range(INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR + 1)]
 DEFAULT_INSURANCE_CATEGORY = "Percent Uninsured"
 
-# coverage_category values map 1:1 to a parent_category "by Age" breakdown that
-# carries the state-total row (category_name='Total, all ages'). Verified against
-# live data: Insured + Uninsured = Total for every state, and the Percent
-# Uninsured value matches Uninsured/Total exactly.
 INSURANCE_CATEGORY_PARENT = {
     "Total": "Population by Age",
     "Insured": "Insured Population (Number) by Age",
@@ -29,19 +25,10 @@ INSURANCE_CATEGORY_PARENT = {
     "Percent Uninsured": "Uninsured Population (Percent) by Age",
 }
 
-# health_insurance stores both point estimates and their margins of error as
-# separate rows; without this filter a query could pick up MOE noise instead
-# of the actual estimate.
 INSURANCE_TOTAL_FILTER = "category_name = 'Total, all ages' AND data_type = 'Estimate'"
 
-# Every state/national-level row in both ClickHouse tables is identified by
-# fips_val_type='S'; area_name is the clean state name (full_state_name has
-# a " (totals)" suffix, e.g. "California (totals)", so it's a worse match key).
 STATE_LEVEL_FILTER = "fips_val_type = 'S'"
 
-# The "grand total" breakdown row in deaths_and_death_rate: every row also
-# carries age/gender/race/chapter_code/sub_chapter_code breakdown dimensions,
-# and this combination is the one that represents the overall state total.
 DEATH_TOTAL_FILTER = (
     "age = 'All ages' AND gender = 'Both genders' AND race = 'All races' "
     "AND chapter_code = 'All' AND sub_chapter_code = 'All'"
@@ -81,8 +68,6 @@ def resolve_housing_category(metrics: list[str] | None, query: str | None) -> st
 def resolve_insurance_category(metrics: list[str] | None, query: str | None) -> str:
     text = " ".join([*(metrics or []), query or ""]).lower()
 
-    # "uninsured" contains "insured" as a substring, so every uninsured check
-    # must be resolved before its insured counterpart is even considered.
     if "percent uninsured" in text or "uninsured rate" in text:
         return "Percent Uninsured"
     if "percent insured" in text or "insured rate" in text:
@@ -124,11 +109,6 @@ def _latest_valid_year(row: dict, min_year: int, max_year: int) -> tuple[int | N
 
 
 class DataService:
-    """Backend abstraction layer.
-
-    death, housing, and insurance are all backed by live ClickHouse OLAP tables.
-    """
-
     def execute(
         self,
         domain: str,
@@ -166,8 +146,6 @@ class DataService:
             return self._rank_insurance(year=year, top_n=top_n, query=query, intent=intent)
         except ClickHouseQueryError:
             return []
-
-    # -- death ---------------------------------------------------------
 
     def _execute_death(
         self,
@@ -267,8 +245,6 @@ class DataService:
 
         return self._to_ranked_items(rows, year, category)
 
-    # -- housing ---------------------------------------------------------
-
     def _execute_housing(
         self,
         state: str,
@@ -313,9 +289,6 @@ class DataService:
             "value": value,
         }
 
-        # Backward compatibility: graph_spec/frontend historically read
-        # median_home_price directly; keep populating it until they migrate
-        # to the normalized value/metric shape used across all domains.
         if category == DEFAULT_HOUSING_CATEGORY:
             result["median_home_price"] = value
 
@@ -376,8 +349,6 @@ class DataService:
         """
         rows = clickhouse_service.query(sql, parameters)
         return rows[0]["latest_year"] if rows and rows[0].get("latest_year") else None
-
-    # -- insurance ---------------------------------------------------------
 
     def _execute_insurance(
         self,
@@ -442,9 +413,6 @@ class DataService:
             "units": "percent" if category in ("Percent Insured", "Percent Uninsured") else "number",
         }
 
-        # Backward compatibility: graph_spec/frontend historically read
-        # uninsured_rate directly; keep populating it until they migrate to
-        # the normalized value/metric shape used across all domains.
         if category == "Percent Uninsured":
             result["uninsured_rate"] = value
 
@@ -505,8 +473,6 @@ class DataService:
 
         return items
 
-    # -- shared helpers ----------------------------------------------------
-
     def _to_ranked_items(self, rows: list[dict], year: int, category: str) -> list[dict]:
         items = []
 
@@ -544,5 +510,4 @@ class DataService:
         }
 
 
-# Singleton instance used throughout the application.
 data_service = DataService()

@@ -1,7 +1,10 @@
+import logging
+
 from app.graph import graph
 from nodes.summarize_memory import summarize_memory
 print("✅ Imported graph")
 
+logger = logging.getLogger(__name__)
 
 
 SESSION_ID = "demo-session"
@@ -256,51 +259,55 @@ if __name__ == "__main__":
             turn_state = reset_turn_fields(previous_state, user_query)
 
         print()
-        for update in graph.stream(
-            turn_state,
-            config=config,
-            stream_mode="updates",
-        ):
-            for node_name, node_update in update.items():
-                print_node_update(node_name, node_update)
+        try:
+            for update in graph.stream(
+                turn_state,
+                config=config,
+                stream_mode="updates",
+            ):
+                for node_name, node_update in update.items():
+                    print_node_update(node_name, node_update)
 
-        result = get_thread_state(config)
+            result = get_thread_state(config)
 
-        print("\n===== GRAPH OUTPUT =====")
-        print(f"Query Type: {result.get('query_type')}")
-        print(f"Standalone Query: {result.get('standalone_query')}")
-        print(f"Tasks: {result.get('tasks')}")
-        print(f"Task Results: {result.get('task_results')}")
-        print(f"Response Mode: {result.get('response_mode')}")
-        print(f"Graph Spec: {result.get('graph_spec')}")
-        print(f"Clarification Needed: {result.get('clarification_needed')}")
-        print(f"Clarification Question: {result.get('clarification_question')}")
-        print(f"Final Response: {result.get('final_response')}\n")
+            print("\n===== GRAPH OUTPUT =====")
+            print(f"Query Type: {result.get('query_type')}")
+            print(f"Standalone Query: {result.get('standalone_query')}")
+            print(f"Tasks: {result.get('tasks')}")
+            print(f"Task Results: {result.get('task_results')}")
+            print(f"Response Mode: {result.get('response_mode')}")
+            print(f"Graph Spec: {result.get('graph_spec')}")
+            print(f"Clarification Needed: {result.get('clarification_needed')}")
+            print(f"Clarification Question: {result.get('clarification_question')}")
+            print(f"Final Response: {result.get('final_response')}\n")
 
-        assistant_message = build_assistant_history_message(result)
-        updated_history = result.get("chat_history", []).copy()
-        updated_history.append({"role": "user", "content": user_query})
-        updated_history.append({"role": "assistant", "content": assistant_message})
+            assistant_message = build_assistant_history_message(result)
+            updated_history = result.get("chat_history", []).copy()
+            updated_history.append({"role": "user", "content": user_query})
+            updated_history.append({"role": "assistant", "content": assistant_message})
 
-        needs_summary = should_summarize(updated_history)
+            needs_summary = should_summarize(updated_history)
 
-        if needs_summary:
-            summary_update = summarize_memory(
+            if needs_summary:
+                summary_update = summarize_memory(
+                    {
+                        "chat_history": updated_history,
+                        "conversation_summary": result.get("conversation_summary", ""),
+                    }
+                )
+
+                if summary_update.get("conversation_summary"):
+                    result["conversation_summary"] = summary_update["conversation_summary"]
+
+            updated_history = cap_chat_history(updated_history)
+
+            graph.update_state(
+                config,
                 {
                     "chat_history": updated_history,
                     "conversation_summary": result.get("conversation_summary", ""),
-                }
+                },
             )
-
-            if summary_update.get("conversation_summary"):
-                result["conversation_summary"] = summary_update["conversation_summary"]
-
-        updated_history = cap_chat_history(updated_history)
-
-        graph.update_state(
-            config,
-            {
-                "chat_history": updated_history,
-                "conversation_summary": result.get("conversation_summary", ""),
-            },
-        )
+        except Exception as exc:
+            logger.error("Unexpected error while processing turn: %s", exc, exc_info=True)
+            print(f"Assistant: Something went wrong processing that request. Please try again.\n")

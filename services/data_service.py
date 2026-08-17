@@ -1,8 +1,13 @@
+import logging
 import re
 import time
 
 from services.clickhouse_service import clickhouse_service, ClickHouseQueryError
 
+
+logger = logging.getLogger(__name__)
+
+DATA_SOURCE_UNAVAILABLE_MESSAGE = "The data source is temporarily unavailable."
 
 DEATH_TABLE = "deaths_and_death_rate"
 HOUSING_TABLE = "housing_prices"
@@ -160,10 +165,11 @@ def _discover_year_columns(table: str) -> list[str]:
         "WHERE database = currentDatabase() AND table = {table:String} "
         "AND match(name, '^y[0-9]{4}$') ORDER BY name"
     )
-    try:
-        rows = clickhouse_service.query(sql, {"table": table})
-    except ClickHouseQueryError:
-        return []
+    # ClickHouseQueryError intentionally propagates here rather than being
+    # swallowed: the caching decision belongs to whichever caller is about
+    # to write to the cache, so a transient failure never gets cached as a
+    # permanent "no data" fact. See get_available_years/get_available_states.
+    rows = clickhouse_service.query(sql, {"table": table})
 
     columns = [row["name"] for row in rows]
     _cache_set(cache_key, columns)
@@ -203,10 +209,7 @@ def _discover_columnar_years(domain: str) -> list[int]:
     conditions = [STATE_LEVEL_FILTER, *extra_conditions]
     sql = f"SELECT {count_exprs} FROM {table} WHERE {' AND '.join(conditions)}"
 
-    try:
-        rows = clickhouse_service.query(sql, parameters)
-    except ClickHouseQueryError:
-        return []
+    rows = clickhouse_service.query(sql, parameters)
 
     if not rows:
         return []
@@ -227,10 +230,7 @@ def _discover_housing_years() -> list[int]:
           AND avg IS NOT NULL AND avg != 'NA' AND avg != ''
         ORDER BY year
     """
-    try:
-        rows = clickhouse_service.query(sql, {"category": DEFAULT_HOUSING_CATEGORY})
-    except ClickHouseQueryError:
-        return []
+    rows = clickhouse_service.query(sql, {"category": DEFAULT_HOUSING_CATEGORY})
 
     return sorted(row["year"] for row in rows if row.get("year") is not None)
 
@@ -241,12 +241,16 @@ def get_available_years(domain: str) -> list[int]:
     if cached is not None:
         return cached
 
-    if domain == "housing":
-        years = _discover_housing_years()
-    elif domain in ("death", "insurance"):
-        years = _discover_columnar_years(domain)
-    else:
-        years = []
+    try:
+        if domain == "housing":
+            years = _discover_housing_years()
+        elif domain in ("death", "insurance"):
+            years = _discover_columnar_years(domain)
+        else:
+            years = []
+    except ClickHouseQueryError as exc:
+        logger.error("Failed to discover available years for domain=%s: %s", domain, exc)
+        return []
 
     _cache_set(cache_key, years)
     return years
@@ -279,7 +283,8 @@ def get_available_states(domain: str) -> list[str]:
     """
     try:
         rows = clickhouse_service.query(sql, {})
-    except ClickHouseQueryError:
+    except ClickHouseQueryError as exc:
+        logger.error("Failed to discover available states for domain=%s: %s", domain, exc)
         return []
 
     states = [row["area_name"] for row in rows if row.get("area_name")]
@@ -303,7 +308,8 @@ def validate_grand_total_filters() -> dict[str, bool]:
             {"category": DEFAULT_DEATH_CATEGORY},
         )
         results["death"] = bool(rows and (rows[0].get("n") or 0) > 0)
-    except ClickHouseQueryError:
+    except ClickHouseQueryError as exc:
+        logger.error("Grand-total filter validation failed for domain=death: %s", exc)
         results["death"] = False
 
     try:
@@ -315,7 +321,8 @@ def validate_grand_total_filters() -> dict[str, bool]:
             {"category": DEFAULT_INSURANCE_CATEGORY, "parent_category": parent_category},
         )
         results["insurance"] = bool(rows and (rows[0].get("n") or 0) > 0)
-    except ClickHouseQueryError:
+    except ClickHouseQueryError as exc:
+        logger.error("Grand-total filter validation failed for domain=insurance: %s", exc)
         results["insurance"] = False
 
     return results
@@ -339,7 +346,11 @@ class DataService:
 
             return self._execute_insurance(state=state, year=year, query=query, intent=intent)
         except ClickHouseQueryError as exc:
-            return self._not_found(domain, state, year, None, f"Data source unavailable: {exc}")
+            logger.error(
+                "ClickHouse execute failed for domain=%s state=%s year=%s: %s",
+                domain, state, year, exc,
+            )
+            return self._not_found(domain, state, year, None, DATA_SOURCE_UNAVAILABLE_MESSAGE)
 
     def rank(
         self,
@@ -357,7 +368,8 @@ class DataService:
                 return self._rank_housing(year=year, top_n=top_n, query=query, intent=intent)
 
             return self._rank_insurance(year=year, top_n=top_n, query=query, intent=intent)
-        except ClickHouseQueryError:
+        except ClickHouseQueryError as exc:
+            logger.error("ClickHouse rank failed for domain=%s year=%s: %s", domain, year, exc)
             return []
 
     def _execute_death(
@@ -453,6 +465,7 @@ class DataService:
             WHERE {STATE_LEVEL_FILTER} AND state != 'US'
               AND category = {{category:String}}
               AND {DEATH_TOTAL_FILTER}
+              AND {_numeric_sql(column)} IS NOT NULL
             ORDER BY {_numeric_sql(column)} DESC
             LIMIT {{top_n:UInt32}}
         """
@@ -676,6 +689,7 @@ class DataService:
               AND coverage_category = {{category:String}}
               AND parent_category = {{parent_category:String}}
               AND {INSURANCE_TOTAL_FILTER}
+              AND {_numeric_sql(column)} IS NOT NULL
             ORDER BY {_numeric_sql(column)} DESC
             LIMIT {{top_n:UInt32}}
         """

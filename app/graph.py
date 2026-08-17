@@ -12,7 +12,6 @@ from nodes.clarification import handle_clarification
 from nodes.resolve_context import resolve_context
 from nodes.execute_tasks import execute_tasks
 from nodes.generate_response import generate_response
-from nodes.summarize_memory import summarize_memory
 from nodes.confirm_intent import confirm_intent
 from nodes.handle_metadata import handle_metadata
 from nodes.handle_conversation import handle_conversation
@@ -79,7 +78,6 @@ builder.add_node("execute_tasks", execute_tasks)
 builder.add_node("recommend_graph", recommend_graph)
 builder.add_node("build_graph_spec", build_graph_spec)
 builder.add_node("generate_response", generate_response)
-builder.add_node("summarize_memory", summarize_memory)
 
 builder.add_conditional_edges(
     START,
@@ -120,8 +118,7 @@ builder.add_edge("create_task_plan", "execute_tasks")
 builder.add_edge("execute_tasks", "recommend_graph")
 builder.add_edge("recommend_graph", "build_graph_spec")
 builder.add_edge("build_graph_spec", "generate_response")
-builder.add_edge("generate_response", "summarize_memory")
-builder.add_edge("summarize_memory", END)
+builder.add_edge("generate_response", END)
 
 connection = sqlite3.connect("statsusa_memory.db", check_same_thread=False)
 checkpointer = SqliteSaver(connection)

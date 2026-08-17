@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any
 
@@ -5,6 +6,8 @@ from dotenv import load_dotenv
 
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class ClickHouseQueryError(RuntimeError):
@@ -45,6 +48,7 @@ class ClickHouseService:
         try:
             result = self._get_client().query(sql, parameters=parameters or {})
         except Exception as exc:
+            logger.error("ClickHouse query failed: %s", exc)
             raise ClickHouseQueryError(f"ClickHouse query failed: {exc}") from exc
 
         return [

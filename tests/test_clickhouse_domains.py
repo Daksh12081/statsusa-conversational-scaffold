@@ -5,6 +5,7 @@ from nodes.execute_tasks import execute_tasks, extract_states
 from nodes.graph_spec import build_graph_spec
 from services.clickhouse_service import ClickHouseQueryError
 from services.data_service import (
+    DATA_SOURCE_UNAVAILABLE_MESSAGE,
     DEATH_TABLE,
     clear_metadata_cache,
     data_service,
@@ -145,6 +146,47 @@ class DeathQueryTests(unittest.TestCase):
         self.assertEqual(results[0]["state"], "Mississippi")
 
     @patch("services.data_service.clickhouse_service")
+    def test_rank_sql_excludes_invalid_values_before_limit(self, mock_clickhouse):
+        # The WHERE clause must exclude NULL/non-numeric values *before*
+        # ORDER BY/LIMIT runs, so a "top 5" request can't come back short
+        # because unparseable rows got sorted into the limit window.
+        mock_clickhouse.query.return_value = [
+            {"state": name, "value": str(value)}
+            for name, value in [
+                ("Mississippi", 1200.1),
+                ("West Virginia", 1150.4),
+                ("Alabama", 1100.2),
+                ("Kentucky", 1080.9),
+                ("Arkansas", 1050.3),
+            ]
+        ]
+
+        results = data_service.rank(
+            domain="death", year=2020, top_n=5, query="top 5 states by crude death rate in 2020"
+        )
+
+        sql, _ = mock_clickhouse.query.call_args[0]
+        self.assertIn("IS NOT NULL", sql)
+        self.assertEqual(len(results), 5)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_rank_result_count_reflects_only_valid_rows_clickhouse_returns(self, mock_clickhouse):
+        # If ClickHouse's WHERE clause has already excluded 2 invalid rows
+        # out of a "top 5" request, only 3 valid rows come back -- that must
+        # be returned as-is, not silently padded or miscounted.
+        mock_clickhouse.query.return_value = [
+            {"state": name, "value": str(value)}
+            for name, value in [("Mississippi", 1200.1), ("West Virginia", 1150.4), ("Alabama", 1100.2)]
+        ]
+
+        results = data_service.rank(
+            domain="death", year=2020, top_n=5, query="top 5 states by crude death rate in 2020"
+        )
+
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(item["value"] is not None for item in results))
+
+    @patch("services.data_service.clickhouse_service")
     def test_invalid_year_rejected_without_querying(self, mock_clickhouse):
         result = data_service.execute(domain="death", state="Texas", year=1800)
 
@@ -170,12 +212,17 @@ class DeathQueryTests(unittest.TestCase):
 
     @patch("services.data_service.clickhouse_service")
     def test_clickhouse_error_reported_distinctly_from_no_data(self, mock_clickhouse):
-        mock_clickhouse.query.side_effect = ClickHouseQueryError("connection refused")
+        mock_clickhouse.query.side_effect = ClickHouseQueryError(
+            "connection refused: host=internal-db-01.private user=svc_prod"
+        )
 
-        result = data_service.execute(domain="death", state="Texas", year=2020)
+        with self.assertLogs("services.data_service", level="ERROR"):
+            result = data_service.execute(domain="death", state="Texas", year=2020)
 
         self.assertFalse(result["found"])
-        self.assertIn("unavailable", result["message"])
+        self.assertEqual(result["message"], DATA_SOURCE_UNAVAILABLE_MESSAGE)
+        self.assertNotIn("internal-db-01", result["message"])
+        self.assertNotIn("svc_prod", result["message"])
 
 
 class HousingQueryTests(unittest.TestCase):
@@ -414,6 +461,41 @@ class InsuranceQueryTests(unittest.TestCase):
         self.assertTrue(all("uninsured_rate" in item for item in results))
 
     @patch("services.data_service.clickhouse_service")
+    def test_rank_sql_excludes_invalid_values_before_limit(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [
+            {"state": name, "value": str(value)}
+            for name, value in [
+                ("Texas", 17.6),
+                ("Oklahoma", 13.9),
+                ("Georgia", 12.9),
+                ("Florida", 12.3),
+                ("Mississippi", 11.8),
+            ]
+        ]
+
+        results = data_service.rank(
+            domain="insurance", year=2022, top_n=5, query="top 5 states by uninsured rate in 2022"
+        )
+
+        sql, _ = mock_clickhouse.query.call_args[0]
+        self.assertIn("IS NOT NULL", sql)
+        self.assertEqual(len(results), 5)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_rank_result_count_reflects_only_valid_rows_clickhouse_returns(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [
+            {"state": name, "value": str(value)}
+            for name, value in [("Texas", 17.6), ("Oklahoma", 13.9), ("Georgia", 12.9)]
+        ]
+
+        results = data_service.rank(
+            domain="insurance", year=2022, top_n=5, query="top 5 states by uninsured rate in 2022"
+        )
+
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(item["value"] is not None for item in results))
+
+    @patch("services.data_service.clickhouse_service")
     def test_no_year_resolves_latest_available_year_dynamically(self, mock_clickhouse):
         row = death_row({2024: "17.1", 2023: "17.4", 2022: "17.6"})
         mock_clickhouse.query.return_value = [row]
@@ -427,12 +509,17 @@ class InsuranceQueryTests(unittest.TestCase):
 
     @patch("services.data_service.clickhouse_service")
     def test_clickhouse_error_reported_distinctly_from_no_data(self, mock_clickhouse):
-        mock_clickhouse.query.side_effect = ClickHouseQueryError("connection refused")
+        mock_clickhouse.query.side_effect = ClickHouseQueryError(
+            "connection refused: host=internal-db-01.private user=svc_prod"
+        )
 
-        result = data_service.execute(domain="insurance", state="Texas", year=2022)
+        with self.assertLogs("services.data_service", level="ERROR"):
+            result = data_service.execute(domain="insurance", state="Texas", year=2022)
 
         self.assertFalse(result["found"])
-        self.assertIn("unavailable", result["message"])
+        self.assertEqual(result["message"], DATA_SOURCE_UNAVAILABLE_MESSAGE)
+        self.assertNotIn("internal-db-01", result["message"])
+        self.assertNotIn("svc_prod", result["message"])
 
     @unittest.skip(
         "Legislative/congressional-district geography is confirmed present in "
@@ -981,6 +1068,46 @@ class CacheTests(unittest.TestCase):
 
         self.assertEqual(mock_clickhouse.query.call_count, 2)
 
+    @patch("services.data_service.clickhouse_service")
+    def test_transient_failure_does_not_poison_year_cache(self, mock_clickhouse):
+        # Regression test for a real bug: a ClickHouseQueryError used to get
+        # cached as a permanent empty result for the full TTL, so a single
+        # transient outage made year validation appear broken for an hour.
+        mock_clickhouse.query.side_effect = ClickHouseQueryError("transient network blip")
+
+        with self.assertLogs("services.data_service", level="ERROR"):
+            first = get_available_years("death")
+
+        self.assertEqual(first, [])
+        self.assertEqual(mock_clickhouse.query.call_count, 1)
+
+        # ClickHouse is healthy again -- the second call must actually reach
+        # it (not return the stale, incorrectly-cached empty result).
+        mock_clickhouse.query.side_effect = [
+            [{"name": "y2024"}],
+            [{"y2024": 53}],
+        ]
+
+        second = get_available_years("death")
+
+        self.assertEqual(second, [2024])
+        self.assertEqual(mock_clickhouse.query.call_count, 3)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_transient_failure_does_not_poison_states_cache(self, mock_clickhouse):
+        mock_clickhouse.query.side_effect = ClickHouseQueryError("transient network blip")
+
+        with self.assertLogs("services.data_service", level="ERROR"):
+            first = get_available_states("death")
+
+        self.assertEqual(first, [])
+
+        mock_clickhouse.query.side_effect = [[{"area_name": "Texas"}]]
+
+        second = get_available_states("death")
+
+        self.assertEqual(second, ["Texas"])
+
 
 class GrandTotalFilterValidationTests(unittest.TestCase):
     """validate_grand_total_filters() -- literals stay hardcoded, but detectably so."""
@@ -1103,6 +1230,32 @@ class ExecuteTasksYearValidationTests(unittest.TestCase):
         called_states = {call.kwargs["state"] for call in mock_data_service.execute.call_args_list}
         self.assertEqual(called_states, {"Ohio", "Massachusetts"})
         self.assertEqual(len(result["items"]), 2)
+
+
+class GraphTopologyTests(unittest.TestCase):
+    """Checks app/graph.py's source text directly instead of importing it.
+
+    Importing app.graph pulls in langgraph, which has an extremely slow
+    first-import cost in this environment (minutes, not milliseconds) --
+    exactly what the lazy-import work elsewhere in this project was meant to
+    avoid paying during normal test runs. A source-text check is a deliberate
+    trade-off to catch a graph-topology regression without reintroducing
+    that cost into the test suite.
+    """
+
+    def _graph_source(self) -> str:
+        import pathlib
+
+        graph_path = pathlib.Path(__file__).resolve().parent.parent / "app" / "graph.py"
+        return graph_path.read_text()
+
+    def test_summarize_memory_node_removed(self):
+        source = self._graph_source()
+        self.assertNotIn("summarize_memory", source)
+
+    def test_generate_response_edges_directly_to_end(self):
+        source = self._graph_source()
+        self.assertIn('builder.add_edge("generate_response", END)', source)
 
 
 if __name__ == "__main__":

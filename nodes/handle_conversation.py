@@ -2,24 +2,6 @@ from app.llm import get_llm
 from app.state import ConversationState
 
 
-def _extract_last_state(history: list[dict]):
-    states = [
-        "Texas",
-        "California",
-        "Florida",
-        "Arizona",
-        "Nevada",
-        "Washington",
-        "Utah",
-    ]
-    for message in reversed(history):
-        text = message.get("content", "")
-        for state in states:
-            if state.lower() in text.lower():
-                return state
-    return None
-
-
 def _generate_conversation_summary(
     history: list[dict],
     existing_summary: str,

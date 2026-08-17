@@ -1,10 +1,19 @@
 import unittest
 from unittest.mock import patch
 
-from nodes.execute_tasks import execute_tasks
+from nodes.execute_tasks import execute_tasks, extract_states
 from nodes.graph_spec import build_graph_spec
 from services.clickhouse_service import ClickHouseQueryError
-from services.data_service import data_service
+from services.data_service import (
+    DEATH_TABLE,
+    clear_metadata_cache,
+    data_service,
+    get_available_states,
+    get_available_years,
+    get_latest_available_year,
+    get_year_range,
+    validate_grand_total_filters,
+)
 
 
 def death_row(year_values: dict) -> dict:
@@ -14,6 +23,40 @@ def death_row(year_values: dict) -> dict:
 
 class DeathQueryTests(unittest.TestCase):
     """'Show the crude death rate in California in 2020' and similar."""
+
+    def setUp(self):
+        clear_metadata_cache()
+
+        year_range_patcher = patch(
+            "services.data_service.get_year_range", return_value=(1999, 2024)
+        )
+        self.addCleanup(year_range_patcher.stop)
+        year_range_patcher.start()
+
+        columns_patcher = patch(
+            "services.data_service._discover_year_columns",
+            return_value=["y2022", "y2023", "y2024"],
+        )
+        self.addCleanup(columns_patcher.stop)
+        columns_patcher.start()
+
+    @patch("services.data_service.clickhouse_service")
+    def test_comma_formatted_value_is_parsed(self, mock_clickhouse):
+        # Regression test: Ohio's real y2020 crude rate is stored as "1,228.90"
+        # (thousands separator). A naive float() call rejects this and was
+        # silently reporting found=False for real data -- caught via live
+        # verification once state coverage expanded beyond the old 4-state list.
+        mock_clickhouse.query.return_value = [{"value": "1,228.90"}]
+
+        result = data_service.execute(
+            domain="death",
+            state="Ohio",
+            year=2020,
+            query="Show the crude death rate in Ohio in 2020",
+        )
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["value"], 1228.90)
 
     @patch("services.data_service.clickhouse_service")
     def test_crude_death_rate_california_2020(self, mock_clickhouse):
@@ -260,6 +303,22 @@ class HousingQueryTests(unittest.TestCase):
 class InsuranceQueryTests(unittest.TestCase):
     """Insurance now queries ClickHouse's health_insurance table (migration complete)."""
 
+    def setUp(self):
+        clear_metadata_cache()
+
+        year_range_patcher = patch(
+            "services.data_service.get_year_range", return_value=(2015, 2024)
+        )
+        self.addCleanup(year_range_patcher.stop)
+        year_range_patcher.start()
+
+        columns_patcher = patch(
+            "services.data_service._discover_year_columns",
+            return_value=["y2022", "y2023", "y2024"],
+        )
+        self.addCleanup(columns_patcher.stop)
+        columns_patcher.start()
+
     @patch("services.data_service.clickhouse_service")
     def test_uninsured_rate_texas_2022(self, mock_clickhouse):
         mock_clickhouse.query.return_value = [{"value": "17.6"}]
@@ -388,6 +447,20 @@ class InsuranceQueryTests(unittest.TestCase):
 
 class ExecuteTasksCompareTests(unittest.TestCase):
     """'Compare the death rate in Texas and California in 2020'."""
+
+    def setUp(self):
+        clear_metadata_cache()
+
+        states_patcher = patch(
+            "nodes.execute_tasks.get_available_states",
+            return_value=["California", "Florida", "New York", "Texas"],
+        )
+        self.addCleanup(states_patcher.stop)
+        states_patcher.start()
+
+        years_patcher = patch("nodes.execute_tasks.get_available_years", return_value=[])
+        self.addCleanup(years_patcher.stop)
+        years_patcher.start()
 
     @patch("nodes.execute_tasks.data_service")
     def test_compare_task_queries_both_states(self, mock_data_service):
@@ -622,6 +695,298 @@ class GraphSpecTests(unittest.TestCase):
             output["graph_spec"]["data"],
             [{"State": "Texas", "Value": 23708399.0, "Metric": "Insured"}],
         )
+
+
+class YearMetadataTests(unittest.TestCase):
+    """get_available_years / get_year_range / get_latest_available_year."""
+
+    def setUp(self):
+        clear_metadata_cache()
+
+    @patch("services.data_service.clickhouse_service")
+    def test_death_years_exclude_unpopulated_years(self, mock_clickhouse):
+        mock_clickhouse.query.side_effect = [
+            [{"name": "y2022"}, {"name": "y2023"}, {"name": "y2024"}],
+            [{"y2022": 53, "y2023": 53, "y2024": 0}],
+        ]
+
+        years = get_available_years("death")
+
+        self.assertEqual(years, [2022, 2023])
+
+        columns_sql, columns_params = mock_clickhouse.query.call_args_list[0][0]
+        self.assertIn("system.columns", columns_sql)
+        self.assertEqual(columns_params["table"], DEATH_TABLE)
+
+        counts_sql, _ = mock_clickhouse.query.call_args_list[1][0]
+        self.assertIn("countIf", counts_sql)
+        self.assertNotIn("state = 'US'", counts_sql)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_death_year_range_1999_to_2024(self, mock_clickhouse):
+        mock_clickhouse.query.side_effect = [
+            [{"name": "y1999"}, {"name": "y2000"}, {"name": "y2024"}],
+            [{"y1999": 10, "y2000": 40, "y2024": 53}],
+        ]
+
+        self.assertEqual(get_year_range("death"), (1999, 2024))
+
+    @patch("services.data_service.clickhouse_service")
+    def test_insurance_latest_available_year(self, mock_clickhouse):
+        mock_clickhouse.query.side_effect = [
+            [{"name": "y2023"}, {"name": "y2024"}],
+            [{"y2023": 52, "y2024": 0}],
+        ]
+
+        self.assertEqual(get_latest_available_year("insurance"), 2023)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_housing_years_exclude_na_placeholder_years(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [
+            {"year": 2016}, {"year": 2020}, {"year": 2025}
+        ]
+
+        years = get_available_years("housing")
+
+        self.assertEqual(years, [2016, 2020, 2025])
+        sql, _ = mock_clickhouse.query.call_args[0]
+        self.assertIn("avg != 'NA'", sql)
+        self.assertIn("DISTINCT year", sql)
+        self.assertEqual(get_year_range("housing"), (2016, 2025))
+
+    @patch("services.data_service.clickhouse_service")
+    def test_year_range_none_when_no_years_available(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = []
+
+        self.assertIsNone(get_year_range("housing"))
+        self.assertIsNone(get_latest_available_year("housing"))
+
+
+class StateResolverTests(unittest.TestCase):
+    """Dynamic geography resolution, replacing the old 4-state regex."""
+
+    def setUp(self):
+        clear_metadata_cache()
+
+    @patch("services.data_service.clickhouse_service")
+    def test_get_available_states_excludes_national_aggregate(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [
+            {"area_name": "Ohio"}, {"area_name": "Massachusetts"}, {"area_name": "Texas"},
+        ]
+
+        states = get_available_states("death")
+
+        sql, _ = mock_clickhouse.query.call_args[0]
+        self.assertIn("state != 'US'", sql)
+        self.assertEqual(states, ["Ohio", "Massachusetts", "Texas"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_extract_states_finds_state_outside_old_four_state_list(self, mock_get_states):
+        mock_get_states.return_value = ["Ohio", "Massachusetts", "Texas", "California"]
+
+        result = extract_states("Show the uninsured rate in Ohio in 2022", "insurance")
+
+        self.assertEqual(result, ["Ohio"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_extract_states_multi_state_outside_old_list(self, mock_get_states):
+        mock_get_states.return_value = ["Ohio", "Massachusetts", "Texas", "California"]
+
+        result = extract_states(
+            "Compare the uninsured rate in Ohio and Massachusetts", "insurance"
+        )
+
+        self.assertEqual(result, ["Ohio", "Massachusetts"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_extract_states_prefers_longer_name_over_substring(self, mock_get_states):
+        mock_get_states.return_value = ["Virginia", "West Virginia"]
+
+        result = extract_states("median home price in West Virginia", "housing")
+
+        self.assertEqual(result, ["West Virginia"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_extract_states_case_insensitive(self, mock_get_states):
+        mock_get_states.return_value = ["Ohio"]
+
+        self.assertEqual(extract_states("uninsured rate in ohio", "insurance"), ["Ohio"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_extract_states_no_match_returns_empty(self, mock_get_states):
+        mock_get_states.return_value = ["Ohio", "Texas"]
+
+        self.assertEqual(extract_states("uninsured rate somewhere", "insurance"), [])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_national_aggregate_not_treated_as_state(self, mock_get_states):
+        mock_get_states.return_value = ["Texas", "California"]
+
+        result = extract_states("What about the United States overall in 2020", "death")
+
+        self.assertEqual(result, [])
+
+
+class CacheTests(unittest.TestCase):
+    """Metadata caching and clear_metadata_cache()."""
+
+    def setUp(self):
+        clear_metadata_cache()
+
+    @patch("services.data_service.clickhouse_service")
+    def test_available_years_cached_across_calls(self, mock_clickhouse):
+        mock_clickhouse.query.side_effect = [
+            [{"name": "y2024"}],
+            [{"y2024": 53}],
+        ]
+
+        first = get_available_years("death")
+        second = get_available_years("death")
+
+        self.assertEqual(first, second)
+        self.assertEqual(mock_clickhouse.query.call_count, 2)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_available_states_cached_across_calls(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [{"area_name": "Texas"}]
+
+        get_available_states("death")
+        get_available_states("death")
+
+        self.assertEqual(mock_clickhouse.query.call_count, 1)
+
+    @patch("services.data_service.clickhouse_service")
+    def test_clear_metadata_cache_forces_refresh(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [{"area_name": "Texas"}]
+
+        get_available_states("death")
+        clear_metadata_cache()
+        get_available_states("death")
+
+        self.assertEqual(mock_clickhouse.query.call_count, 2)
+
+
+class GrandTotalFilterValidationTests(unittest.TestCase):
+    """validate_grand_total_filters() -- literals stay hardcoded, but detectably so."""
+
+    @patch("services.data_service.clickhouse_service")
+    def test_all_filters_pass(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [{"n": 53}]
+
+        self.assertEqual(validate_grand_total_filters(), {"death": True, "insurance": True})
+
+    @patch("services.data_service.clickhouse_service")
+    def test_detects_zero_matching_rows(self, mock_clickhouse):
+        mock_clickhouse.query.return_value = [{"n": 0}]
+
+        self.assertEqual(validate_grand_total_filters(), {"death": False, "insurance": False})
+
+    @patch("services.data_service.clickhouse_service")
+    def test_detects_query_error(self, mock_clickhouse):
+        mock_clickhouse.query.side_effect = ClickHouseQueryError("connection refused")
+
+        self.assertEqual(validate_grand_total_filters(), {"death": False, "insurance": False})
+
+
+class ExecuteTasksYearValidationTests(unittest.TestCase):
+    """Explicit-year validation against get_available_years(domain)."""
+
+    def setUp(self):
+        clear_metadata_cache()
+
+    @patch("nodes.execute_tasks.data_service")
+    @patch("nodes.execute_tasks.get_available_years")
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_explicit_death_year_1999_is_honored(
+        self, mock_get_states, mock_get_years, mock_data_service
+    ):
+        mock_get_states.return_value = ["Texas"]
+        mock_get_years.return_value = list(range(1999, 2025))
+        mock_data_service.execute.return_value = {
+            "found": True,
+            "domain": "death",
+            "state": "Texas",
+            "year": 1999,
+            "metric": "Crude Rate",
+            "value": 850.0,
+        }
+
+        state = {
+            "tasks": [
+                {
+                    "task_id": "task_1",
+                    "domain": "death",
+                    "query": "Show the crude death rate in Texas in 1999",
+                    "depends_on": [],
+                }
+            ],
+        }
+
+        output = execute_tasks(state)
+        result = output["task_results"][0]["result"]
+
+        self.assertEqual(result["year"], 1999)
+        mock_data_service.execute.assert_called_once()
+        self.assertEqual(mock_data_service.execute.call_args.kwargs["year"], 1999)
+
+    @patch("nodes.execute_tasks.data_service")
+    @patch("nodes.execute_tasks.get_available_years")
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_explicit_unavailable_year_returns_clean_response(
+        self, mock_get_states, mock_get_years, mock_data_service
+    ):
+        mock_get_states.return_value = ["Texas"]
+        mock_get_years.return_value = list(range(1999, 2025))
+
+        state = {
+            "tasks": [
+                {
+                    "task_id": "task_1",
+                    "domain": "death",
+                    "query": "Show the crude death rate in Texas in 1800",
+                    "depends_on": [],
+                }
+            ],
+        }
+
+        output = execute_tasks(state)
+        result = output["task_results"][0]["result"]
+
+        self.assertFalse(result["found"])
+        self.assertEqual(result["year"], 1800)
+        self.assertIn("1800", result["message"])
+        mock_data_service.execute.assert_not_called()
+
+    @patch("nodes.execute_tasks.data_service")
+    @patch("nodes.execute_tasks.get_available_years")
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_multi_state_comparison_outside_old_state_list(
+        self, mock_get_states, mock_get_years, mock_data_service
+    ):
+        mock_get_states.return_value = ["Ohio", "Massachusetts"]
+        mock_get_years.return_value = []
+        mock_data_service.execute.side_effect = [
+            {"found": True, "domain": "death", "state": "Ohio", "year": 2020, "metric": "Crude Rate", "value": 950.0},
+            {"found": True, "domain": "death", "state": "Massachusetts", "year": 2020, "metric": "Crude Rate", "value": 820.0},
+        ]
+
+        state = {
+            "tasks": [
+                {
+                    "task_id": "task_1",
+                    "domain": "death",
+                    "query": "Compare the death rate in Ohio and Massachusetts in 2020",
+                    "depends_on": [],
+                }
+            ],
+        }
+
+        output = execute_tasks(state)
+        result = output["task_results"][0]["result"]
+
+        called_states = {call.kwargs["state"] for call in mock_data_service.execute.call_args_list}
+        self.assertEqual(called_states, {"Ohio", "Massachusetts"})
+        self.assertEqual(len(result["items"]), 2)
 
 
 if __name__ == "__main__":

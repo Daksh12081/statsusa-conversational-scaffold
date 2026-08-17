@@ -1,20 +1,23 @@
 import re
+import time
 
 from services.clickhouse_service import clickhouse_service, ClickHouseQueryError
 
 
+DEATH_TABLE = "deaths_and_death_rate"
+HOUSING_TABLE = "housing_prices"
+INSURANCE_TABLE = "health_insurance"
+
+DOMAIN_TABLES = {
+    "death": DEATH_TABLE,
+    "housing": HOUSING_TABLE,
+    "insurance": INSURANCE_TABLE,
+}
+
 CLICKHOUSE_DOMAINS = {"death", "housing", "insurance"}
 
-DEATH_MIN_YEAR = 1999
-DEATH_MAX_YEAR = 2024
-DEATH_YEAR_COLUMNS = [f"y{year}" for year in range(DEATH_MIN_YEAR, DEATH_MAX_YEAR + 1)]
 DEFAULT_DEATH_CATEGORY = "Crude Rate"
-
 DEFAULT_HOUSING_CATEGORY = "median_listing_price"
-
-INSURANCE_MIN_YEAR = 2012
-INSURANCE_MAX_YEAR = 2024
-INSURANCE_YEAR_COLUMNS = [f"y{year}" for year in range(INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR + 1)]
 DEFAULT_INSURANCE_CATEGORY = "Percent Uninsured"
 
 INSURANCE_CATEGORY_PARENT = {
@@ -33,6 +36,30 @@ DEATH_TOTAL_FILTER = (
     "age = 'All ages' AND gender = 'Both genders' AND race = 'All races' "
     "AND chapter_code = 'All' AND sub_chapter_code = 'All'"
 )
+
+_CACHE_TTL_SECONDS = 3600
+_cache: dict[str, tuple[float, object]] = {}
+
+
+def _cache_get(key: str):
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+
+    expires_at, value = entry
+    if time.time() >= expires_at:
+        del _cache[key]
+        return None
+
+    return value
+
+
+def _cache_set(key: str, value, ttl: int = _CACHE_TTL_SECONDS) -> None:
+    _cache[key] = (time.time() + ttl, value)
+
+
+def clear_metadata_cache() -> None:
+    _cache.clear()
 
 
 def resolve_death_category(metrics: list[str] | None, query: str | None) -> str:
@@ -85,27 +112,213 @@ def resolve_insurance_category(metrics: list[str] | None, query: str | None) -> 
     return DEFAULT_INSURANCE_CATEGORY
 
 
+def _numeric_sql(column_expr: str) -> str:
+    """SQL for parsing a Nullable(String) column as a float, tolerating
+    comma thousands-separators (e.g. '1,228.90') the same way _to_float does."""
+    return f"toFloat64OrNull(replaceAll({column_expr}, ',', ''))"
+
+
 def _to_float(raw) -> float | None:
     if raw is None:
         return None
+    if isinstance(raw, str):
+        raw = raw.replace(",", "")
     try:
         return float(raw)
     except (TypeError, ValueError):
         return None
 
 
-def _validate_year(year: int, min_year: int, max_year: int) -> int:
+def _validate_year(year: int, year_range: tuple[int, int] | None) -> int:
+    if year_range is None:
+        raise ValueError("Year data is currently unavailable.")
+
+    min_year, max_year = year_range
     if not isinstance(year, int) or not (min_year <= year <= max_year):
         raise ValueError(f"Year must be between {min_year} and {max_year}.")
     return year
 
 
-def _latest_valid_year(row: dict, min_year: int, max_year: int) -> tuple[int | None, float | None]:
-    for year in range(max_year, min_year - 1, -1):
-        value = _to_float(row.get(f"y{year}"))
+def _latest_valid_year_from_columns(
+    row: dict, year_columns: list[str]
+) -> tuple[int | None, float | None]:
+    for column in reversed(year_columns):
+        value = _to_float(row.get(column))
         if value is not None:
-            return year, value
+            return int(column[1:]), value
     return None, None
+
+
+def _discover_year_columns(table: str) -> list[str]:
+    cache_key = f"year_columns:{table}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    sql = (
+        "SELECT name FROM system.columns "
+        "WHERE database = currentDatabase() AND table = {table:String} "
+        "AND match(name, '^y[0-9]{4}$') ORDER BY name"
+    )
+    try:
+        rows = clickhouse_service.query(sql, {"table": table})
+    except ClickHouseQueryError:
+        return []
+
+    columns = [row["name"] for row in rows]
+    _cache_set(cache_key, columns)
+    return columns
+
+
+def _columnar_domain_config(domain: str) -> tuple[str, list[str], dict]:
+    if domain == "death":
+        return (
+            DEATH_TABLE,
+            ["category = {category:String}", DEATH_TOTAL_FILTER],
+            {"category": DEFAULT_DEATH_CATEGORY},
+        )
+
+    parent_category = INSURANCE_CATEGORY_PARENT[DEFAULT_INSURANCE_CATEGORY]
+    return (
+        INSURANCE_TABLE,
+        [
+            "coverage_category = {category:String}",
+            "parent_category = {parent_category:String}",
+            INSURANCE_TOTAL_FILTER,
+        ],
+        {"category": DEFAULT_INSURANCE_CATEGORY, "parent_category": parent_category},
+    )
+
+
+def _discover_columnar_years(domain: str) -> list[int]:
+    table, extra_conditions, parameters = _columnar_domain_config(domain)
+    year_columns = _discover_year_columns(table)
+    if not year_columns:
+        return []
+
+    count_exprs = ", ".join(
+        f"countIf({_numeric_sql(column)} IS NOT NULL) AS {column}"
+        for column in year_columns
+    )
+    conditions = [STATE_LEVEL_FILTER, *extra_conditions]
+    sql = f"SELECT {count_exprs} FROM {table} WHERE {' AND '.join(conditions)}"
+
+    try:
+        rows = clickhouse_service.query(sql, parameters)
+    except ClickHouseQueryError:
+        return []
+
+    if not rows:
+        return []
+
+    row = rows[0]
+    years = [
+        int(column[1:])
+        for column in year_columns
+        if (row.get(column) or 0) > 0
+    ]
+    return sorted(years)
+
+
+def _discover_housing_years() -> list[int]:
+    sql = f"""
+        SELECT DISTINCT year FROM {HOUSING_TABLE}
+        WHERE {STATE_LEVEL_FILTER} AND category = {{category:String}}
+          AND avg IS NOT NULL AND avg != 'NA' AND avg != ''
+        ORDER BY year
+    """
+    try:
+        rows = clickhouse_service.query(sql, {"category": DEFAULT_HOUSING_CATEGORY})
+    except ClickHouseQueryError:
+        return []
+
+    return sorted(row["year"] for row in rows if row.get("year") is not None)
+
+
+def get_available_years(domain: str) -> list[int]:
+    cache_key = f"available_years:{domain}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    if domain == "housing":
+        years = _discover_housing_years()
+    elif domain in ("death", "insurance"):
+        years = _discover_columnar_years(domain)
+    else:
+        years = []
+
+    _cache_set(cache_key, years)
+    return years
+
+
+def get_year_range(domain: str) -> tuple[int, int] | None:
+    years = get_available_years(domain)
+    return (min(years), max(years)) if years else None
+
+
+def get_latest_available_year(domain: str) -> int | None:
+    years = get_available_years(domain)
+    return max(years) if years else None
+
+
+def get_available_states(domain: str) -> list[str]:
+    table = DOMAIN_TABLES.get(domain)
+    if table is None:
+        return []
+
+    cache_key = f"states:{domain}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    sql = f"""
+        SELECT DISTINCT area_name FROM {table}
+        WHERE {STATE_LEVEL_FILTER} AND state != 'US' AND area_name IS NOT NULL
+        ORDER BY area_name
+    """
+    try:
+        rows = clickhouse_service.query(sql, {})
+    except ClickHouseQueryError:
+        return []
+
+    states = [row["area_name"] for row in rows if row.get("area_name")]
+    _cache_set(cache_key, states)
+    return states
+
+
+def validate_grand_total_filters() -> dict[str, bool]:
+    """Confirms the hardcoded grand-total filter literals still match real rows.
+
+    A False entry means the literal category-name strings (e.g. 'All ages',
+    'Total, all ages') no longer match the live data's labeling convention,
+    so query results for that domain should not be trusted until investigated.
+    """
+    results = {}
+
+    try:
+        rows = clickhouse_service.query(
+            f"SELECT count() AS n FROM {DEATH_TABLE} WHERE {STATE_LEVEL_FILTER} "
+            f"AND category = {{category:String}} AND {DEATH_TOTAL_FILTER}",
+            {"category": DEFAULT_DEATH_CATEGORY},
+        )
+        results["death"] = bool(rows and (rows[0].get("n") or 0) > 0)
+    except ClickHouseQueryError:
+        results["death"] = False
+
+    try:
+        parent_category = INSURANCE_CATEGORY_PARENT[DEFAULT_INSURANCE_CATEGORY]
+        rows = clickhouse_service.query(
+            f"SELECT count() AS n FROM {INSURANCE_TABLE} WHERE {STATE_LEVEL_FILTER} "
+            f"AND coverage_category = {{category:String}} "
+            f"AND parent_category = {{parent_category:String}} AND {INSURANCE_TOTAL_FILTER}",
+            {"category": DEFAULT_INSURANCE_CATEGORY, "parent_category": parent_category},
+        )
+        results["insurance"] = bool(rows and (rows[0].get("n") or 0) > 0)
+    except ClickHouseQueryError:
+        results["insurance"] = False
+
+    return results
 
 
 class DataService:
@@ -159,13 +372,13 @@ class DataService:
 
         if year is not None:
             try:
-                year = _validate_year(year, DEATH_MIN_YEAR, DEATH_MAX_YEAR)
+                year = _validate_year(year, get_year_range("death"))
             except ValueError as exc:
                 return self._not_found("death", state, year, category, str(exc))
 
             sql = f"""
                 SELECT y{year} AS value
-                FROM deaths_and_death_rate
+                FROM {DEATH_TABLE}
                 WHERE {STATE_LEVEL_FILTER}
                   AND area_name = {{state:String}}
                   AND category = {{category:String}}
@@ -175,9 +388,10 @@ class DataService:
             rows = clickhouse_service.query(sql, {"state": state, "category": category})
             value = _to_float(rows[0]["value"]) if rows else None
         else:
+            year_columns = _discover_year_columns(DEATH_TABLE)
             sql = f"""
-                SELECT {", ".join(DEATH_YEAR_COLUMNS)}
-                FROM deaths_and_death_rate
+                SELECT {", ".join(year_columns)}
+                FROM {DEATH_TABLE}
                 WHERE {STATE_LEVEL_FILTER}
                   AND area_name = {{state:String}}
                   AND category = {{category:String}}
@@ -185,7 +399,7 @@ class DataService:
                 LIMIT 1
             """
             rows = clickhouse_service.query(sql, {"state": state, "category": category})
-            year, value = _latest_valid_year(rows[0] if rows else {}, DEATH_MIN_YEAR, DEATH_MAX_YEAR)
+            year, value = _latest_valid_year_from_columns(rows[0] if rows else {}, year_columns)
 
         if value is None:
             return self._not_found(
@@ -214,31 +428,32 @@ class DataService:
 
         if year is not None:
             try:
-                year = _validate_year(year, DEATH_MIN_YEAR, DEATH_MAX_YEAR)
+                year = _validate_year(year, get_year_range("death"))
             except ValueError:
                 return []
         else:
+            year_columns = _discover_year_columns(DEATH_TABLE)
             sql = f"""
-                SELECT {", ".join(DEATH_YEAR_COLUMNS)}
-                FROM deaths_and_death_rate
+                SELECT {", ".join(year_columns)}
+                FROM {DEATH_TABLE}
                 WHERE {STATE_LEVEL_FILTER} AND state = 'US'
                   AND category = {{category:String}}
                   AND {DEATH_TOTAL_FILTER}
                 LIMIT 1
             """
             rows = clickhouse_service.query(sql, {"category": category})
-            year, _ = _latest_valid_year(rows[0] if rows else {}, DEATH_MIN_YEAR, DEATH_MAX_YEAR)
+            year, _ = _latest_valid_year_from_columns(rows[0] if rows else {}, year_columns)
             if year is None:
                 return []
 
         column = f"y{year}"
         sql = f"""
             SELECT area_name AS state, {column} AS value
-            FROM deaths_and_death_rate
+            FROM {DEATH_TABLE}
             WHERE {STATE_LEVEL_FILTER} AND state != 'US'
               AND category = {{category:String}}
               AND {DEATH_TOTAL_FILTER}
-            ORDER BY toFloat64OrNull({column}) DESC
+            ORDER BY {_numeric_sql(column)} DESC
             LIMIT {{top_n:UInt32}}
         """
         rows = clickhouse_service.query(sql, {"category": category, "top_n": top_n})
@@ -262,13 +477,13 @@ class DataService:
                     "housing", state, None, category, f"No housing data found for {state}."
                 )
 
-        sql = """
+        sql = f"""
             SELECT avg AS value
-            FROM housing_prices
-            WHERE fips_val_type = 'S'
-              AND area_name = {state:String}
-              AND category = {category:String}
-              AND year = {year:Int32}
+            FROM {HOUSING_TABLE}
+            WHERE {STATE_LEVEL_FILTER}
+              AND area_name = {{state:String}}
+              AND category = {{category:String}}
+              AND year = {{year:Int32}}
             LIMIT 1
         """
         rows = clickhouse_service.query(sql, {"state": state, "category": category, "year": year})
@@ -309,15 +524,15 @@ class DataService:
             if year is None:
                 return []
 
-        sql = """
+        sql = f"""
             SELECT area_name AS state, avg AS value
-            FROM housing_prices
-            WHERE fips_val_type = 'S' AND state != 'US'
-              AND category = {category:String}
-              AND year = {year:Int32}
+            FROM {HOUSING_TABLE}
+            WHERE {STATE_LEVEL_FILTER} AND state != 'US'
+              AND category = {{category:String}}
+              AND year = {{year:Int32}}
               AND avg IS NOT NULL AND avg != 'NA' AND avg != ''
-            ORDER BY toFloat64OrNull(avg) DESC
-            LIMIT {top_n:UInt32}
+            ORDER BY {_numeric_sql('avg')} DESC
+            LIMIT {{top_n:UInt32}}
         """
         rows = clickhouse_service.query(sql, {"category": category, "year": year, "top_n": top_n})
         items = self._to_ranked_items(rows, year, category)
@@ -330,7 +545,7 @@ class DataService:
 
     def _latest_housing_year(self, category: str, state: str | None) -> int | None:
         conditions = [
-            "fips_val_type = 'S'",
+            STATE_LEVEL_FILTER,
             "category = {category:String}",
             "avg IS NOT NULL",
             "avg != 'NA'",
@@ -344,7 +559,7 @@ class DataService:
 
         sql = f"""
             SELECT max(year) AS latest_year
-            FROM housing_prices
+            FROM {HOUSING_TABLE}
             WHERE {" AND ".join(conditions)}
         """
         rows = clickhouse_service.query(sql, parameters)
@@ -363,13 +578,13 @@ class DataService:
 
         if year is not None:
             try:
-                year = _validate_year(year, INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR)
+                year = _validate_year(year, get_year_range("insurance"))
             except ValueError as exc:
                 return self._not_found("insurance", state, year, category, str(exc))
 
             sql = f"""
                 SELECT y{year} AS value
-                FROM health_insurance
+                FROM {INSURANCE_TABLE}
                 WHERE {STATE_LEVEL_FILTER}
                   AND area_name = {{state:String}}
                   AND coverage_category = {{category:String}}
@@ -382,9 +597,10 @@ class DataService:
             )
             value = _to_float(rows[0]["value"]) if rows else None
         else:
+            year_columns = _discover_year_columns(INSURANCE_TABLE)
             sql = f"""
-                SELECT {", ".join(INSURANCE_YEAR_COLUMNS)}
-                FROM health_insurance
+                SELECT {", ".join(year_columns)}
+                FROM {INSURANCE_TABLE}
                 WHERE {STATE_LEVEL_FILTER}
                   AND area_name = {{state:String}}
                   AND coverage_category = {{category:String}}
@@ -395,7 +611,7 @@ class DataService:
             rows = clickhouse_service.query(
                 sql, {"state": state, "category": category, "parent_category": parent_category}
             )
-            year, value = _latest_valid_year(rows[0] if rows else {}, INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR)
+            year, value = _latest_valid_year_from_columns(rows[0] if rows else {}, year_columns)
 
         if value is None:
             return self._not_found(
@@ -431,13 +647,14 @@ class DataService:
 
         if year is not None:
             try:
-                year = _validate_year(year, INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR)
+                year = _validate_year(year, get_year_range("insurance"))
             except ValueError:
                 return []
         else:
+            year_columns = _discover_year_columns(INSURANCE_TABLE)
             sql = f"""
-                SELECT {", ".join(INSURANCE_YEAR_COLUMNS)}
-                FROM health_insurance
+                SELECT {", ".join(year_columns)}
+                FROM {INSURANCE_TABLE}
                 WHERE {STATE_LEVEL_FILTER} AND state = 'US'
                   AND coverage_category = {{category:String}}
                   AND parent_category = {{parent_category:String}}
@@ -447,19 +664,19 @@ class DataService:
             rows = clickhouse_service.query(
                 sql, {"category": category, "parent_category": parent_category}
             )
-            year, _ = _latest_valid_year(rows[0] if rows else {}, INSURANCE_MIN_YEAR, INSURANCE_MAX_YEAR)
+            year, _ = _latest_valid_year_from_columns(rows[0] if rows else {}, year_columns)
             if year is None:
                 return []
 
         column = f"y{year}"
         sql = f"""
             SELECT area_name AS state, {column} AS value
-            FROM health_insurance
+            FROM {INSURANCE_TABLE}
             WHERE {STATE_LEVEL_FILTER} AND state != 'US'
               AND coverage_category = {{category:String}}
               AND parent_category = {{parent_category:String}}
               AND {INSURANCE_TOTAL_FILTER}
-            ORDER BY toFloat64OrNull({column}) DESC
+            ORDER BY {_numeric_sql(column)} DESC
             LIMIT {{top_n:UInt32}}
         """
         rows = clickhouse_service.query(

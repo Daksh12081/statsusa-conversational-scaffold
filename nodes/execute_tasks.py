@@ -1,20 +1,43 @@
 import re
 
 from app.state import ConversationState
-from services.data_service import data_service
+from services.data_service import data_service, get_available_states, get_available_years
 
 
-STATE_PATTERN = re.compile(
-    r"(Texas|California|Florida|New York)",
-    re.IGNORECASE,
-)
-YEAR_PATTERN = re.compile(r"(20\d{2})")
+YEAR_PATTERN = re.compile(r"\b(\d{4})\b")
 TOP_N_PATTERN = re.compile(r"top\s+(\d+)|five|four|three|two", re.IGNORECASE)
 
 
-def extract_states(query: str) -> list[str]:
-    matches = STATE_PATTERN.findall(query)
-    return list(dict.fromkeys(match.title() for match in matches))
+def extract_states(query: str, domain: str) -> list[str]:
+    available_states = get_available_states(domain)
+    if not available_states:
+        return []
+
+    query_lower = query.lower()
+    ordered_states = sorted(available_states, key=len, reverse=True)
+
+    claimed_spans: list[tuple[int, int]] = []
+    found: list[tuple[int, str]] = []
+
+    for state_name in ordered_states:
+        pattern = re.compile(rf"\b{re.escape(state_name.lower())}\b")
+        for match in pattern.finditer(query_lower):
+            start, end = match.span()
+            if any(start < c_end and end > c_start for c_start, c_end in claimed_spans):
+                continue
+            claimed_spans.append((start, end))
+            found.append((start, state_name))
+
+    found.sort(key=lambda item: item[0])
+
+    seen = set()
+    result = []
+    for _, state_name in found:
+        if state_name not in seen:
+            seen.add(state_name)
+            result.append(state_name)
+
+    return result
 
 
 def extract_year(query: str) -> int | None:
@@ -75,9 +98,9 @@ def extract_states_from_dependencies(dependency_results: list[dict]) -> list[str
 def resolve_display_year(year: int | None, items: list[dict]) -> int | None:
     """Best-effort year to report when none was requested upfront.
 
-    death/housing tasks may run with year=None and let DataService resolve
-    the latest available year per item; if every returned item agrees on a
-    year, surface that instead of leaving the result's year as None.
+    death/housing/insurance tasks may run with year=None and let DataService
+    resolve the latest available year per item; if every returned item agrees
+    on a year, surface that instead of leaving the result's year as None.
     """
     if year is not None:
         return year
@@ -87,6 +110,19 @@ def resolve_display_year(year: int | None, items: list[dict]) -> int | None:
         return resolved_years.pop()
 
     return None
+
+
+def build_unavailable_year_result(task_id: str, domain: str, query: str, year: int) -> dict:
+    return {
+        "task_id": task_id,
+        "query": query,
+        "result": {
+            "found": False,
+            "domain": domain,
+            "year": year,
+            "message": f"No {domain} data is available for {year}.",
+        },
+    }
 
 
 def execute_ranked_task(
@@ -129,9 +165,17 @@ def execute_tasks(state: ConversationState) -> dict:
         depends_on = task.get("depends_on", [])
 
         dependency_results = get_dependency_results(depends_on, completed_results)
-        states = extract_states(query)
+        states = extract_states(query, domain)
         year = extract_year(query)
         top_n = extract_top_n(query)
+
+        if year is not None:
+            available_years = get_available_years(domain)
+            if available_years and year not in available_years:
+                task_result = build_unavailable_year_result(task_id, domain, query, year)
+                results.append(task_result)
+                completed_results[task_id] = task_result
+                continue
 
         if not states and dependency_results:
             states = extract_states_from_dependencies(dependency_results)

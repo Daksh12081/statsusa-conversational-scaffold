@@ -819,12 +819,128 @@ class StateResolverTests(unittest.TestCase):
         self.assertEqual(extract_states("uninsured rate somewhere", "insurance"), [])
 
     @patch("nodes.execute_tasks.get_available_states")
-    def test_national_aggregate_not_treated_as_state(self, mock_get_states):
+    def test_national_aggregate_not_confused_with_a_specific_state(self, mock_get_states):
+        # "United States" must resolve to the distinct "US" national-aggregate
+        # token, never to one of the actual per-state names in the dynamic list.
         mock_get_states.return_value = ["Texas", "California"]
 
         result = extract_states("What about the United States overall in 2020", "death")
 
-        self.assertEqual(result, [])
+        self.assertEqual(result, ["US"])
+
+
+class StateAliasTests(unittest.TestCase):
+    """Alias normalization layered on top of the dynamic state resolver."""
+
+    ALL_STATES = [
+        "California",
+        "Texas",
+        "New York",
+        "Massachusetts",
+        "Virginia",
+        "West Virginia",
+        "District of Columbia",
+        "Florida",
+        "Pennsylvania",
+        "Illinois",
+        "Washington",
+        "North Carolina",
+        "South Carolina",
+        "North Dakota",
+        "South Dakota",
+    ]
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_ca_resolves_to_california(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+        self.assertEqual(extract_states("uninsured rate in CA", "insurance"), ["California"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_tx_resolves_to_texas(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+        self.assertEqual(extract_states("median home price in TX", "housing"), ["Texas"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_ny_and_ny_state_resolve_to_new_york(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+        self.assertEqual(extract_states("crude death rate in NY", "death"), ["New York"])
+        self.assertEqual(extract_states("crude death rate in NY State", "death"), ["New York"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_mass_resolves_to_massachusetts(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+        self.assertEqual(extract_states("uninsured rate in Mass", "insurance"), ["Massachusetts"])
+        self.assertEqual(extract_states("uninsured rate in MA", "insurance"), ["Massachusetts"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_washington_dc_variants_resolve_to_district_of_columbia(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+        self.assertEqual(
+            extract_states("uninsured rate in Washington DC", "insurance"),
+            ["District of Columbia"],
+        )
+        self.assertEqual(
+            extract_states("uninsured rate in DC", "insurance"), ["District of Columbia"]
+        )
+        self.assertEqual(
+            extract_states("uninsured rate in D.C.", "insurance"), ["District of Columbia"]
+        )
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_us_variants_resolve_to_us(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+        for phrase in ["US", "U.S.", "USA", "United States"]:
+            self.assertEqual(
+                extract_states(f"uninsured rate in the {phrase}", "insurance"),
+                ["US"],
+                msg=f"failed for phrase: {phrase}",
+            )
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_west_virginia_matched_before_virginia_with_aliases(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+
+        self.assertEqual(
+            extract_states("median home price in West Virginia", "housing"), ["West Virginia"]
+        )
+        self.assertEqual(extract_states("median home price in WV", "housing"), ["West Virginia"])
+        self.assertEqual(extract_states("median home price in VA", "housing"), ["Virginia"])
+        self.assertEqual(
+            extract_states("median home price in Virginia", "housing"), ["Virginia"]
+        )
+        self.assertEqual(
+            extract_states("compare WV and VA", "housing"), ["West Virginia", "Virginia"]
+        )
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_multi_state_query_using_aliases(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+
+        result = extract_states("compare the uninsured rate in CA, TX, and Mass", "insurance")
+
+        self.assertEqual(result, ["California", "Texas", "Massachusetts"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_alias_matching_is_case_insensitive(self, mock_get_states):
+        mock_get_states.return_value = self.ALL_STATES
+
+        self.assertEqual(extract_states("uninsured rate in ca", "insurance"), ["California"])
+        self.assertEqual(extract_states("uninsured rate in Ca", "insurance"), ["California"])
+        self.assertEqual(extract_states("uninsured rate in usa", "insurance"), ["US"])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_alias_not_applied_when_canonical_state_unavailable(self, mock_get_states):
+        # PA -> Pennsylvania alias should be inert if the domain's dynamic
+        # state list doesn't actually include Pennsylvania.
+        mock_get_states.return_value = ["Texas", "California"]
+
+        self.assertEqual(extract_states("median home price in PA", "housing"), [])
+
+    @patch("nodes.execute_tasks.get_available_states")
+    def test_us_alias_available_even_if_state_list_is_empty(self, mock_get_states):
+        mock_get_states.return_value = []
+
+        self.assertEqual(extract_states("uninsured rate in the US", "insurance"), ["US"])
 
 
 class CacheTests(unittest.TestCase):

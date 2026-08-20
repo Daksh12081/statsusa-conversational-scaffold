@@ -3,6 +3,7 @@
 from typing import Dict
 
 from app.llm import get_llm
+from app.llm_utils import response_text
 
 
 SUMMARY_PROMPT = """
@@ -47,5 +48,5 @@ def summarize_memory(state: Dict) -> Dict:
     response = get_llm().invoke(prompt)
 
     return {
-        "conversation_summary": response.content.strip(),
+        "conversation_summary": response_text(response),
     }

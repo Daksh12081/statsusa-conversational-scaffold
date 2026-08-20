@@ -1,4 +1,5 @@
 from app.llm import get_llm
+from app.llm_utils import response_text
 from app.state import ConversationState
 
 
@@ -52,7 +53,7 @@ Reason: <graph_reason>
     response = get_llm().invoke(prompt)
 
     return {
-        "final_response": response.content.strip(),
+        "final_response": response_text(response),
         "graph_spec": graph_spec,
         "error": None,
     }

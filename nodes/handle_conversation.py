@@ -1,4 +1,5 @@
 from app.llm import get_llm
+from app.llm_utils import response_text
 from app.state import ConversationState
 
 
@@ -32,7 +33,7 @@ Rules:
 """
 
     response = get_llm().invoke(prompt)
-    return response.content.strip()
+    return response_text(response)
 
 
 def _answer_conversation_question(
@@ -65,7 +66,7 @@ Instructions:
 """
 
     response = get_llm().invoke(prompt)
-    return response.content.strip()
+    return response_text(response)
 
 
 def handle_conversation(state: ConversationState):

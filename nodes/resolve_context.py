@@ -1,4 +1,5 @@
 from app.llm import get_llm
+from app.llm_utils import response_text
 from app.state import ConversationState
 
 
@@ -46,5 +47,5 @@ Rules:
     response = get_llm().invoke(prompt)
 
     return {
-        "standalone_query": response.content.strip()
+        "standalone_query": response_text(response)
     }

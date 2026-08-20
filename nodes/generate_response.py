@@ -3,6 +3,22 @@ from app.llm_utils import response_text
 from app.state import ConversationState
 
 
+def _resolve_assumed_year(task_results: list[dict]) -> int | None:
+    """The single year the executor auto-selected, when every task result
+    agrees on one -- used only when the user never specified a year."""
+    years = set()
+
+    for task_result in task_results:
+        result = task_result.get("result") or {}
+        if result.get("year") is not None:
+            years.add(result["year"])
+        for item in result.get("items", []):
+            if item.get("year") is not None:
+                years.add(item["year"])
+
+    return years.pop() if len(years) == 1 else None
+
+
 def generate_response(state: ConversationState) -> dict:
     task_results = state.get("task_results", [])
     graph_needed = state.get("graph_needed", False)
@@ -12,6 +28,17 @@ def generate_response(state: ConversationState) -> dict:
     graph_spec = state.get("graph_spec")
     response_mode = state.get("response_mode") or "single"
     standalone_query = state.get("standalone_query") or state["user_query"]
+
+    requested_years = (state.get("current_intent") or {}).get("years") or []
+    assumed_year = None if requested_years else _resolve_assumed_year(task_results)
+
+    if assumed_year is not None:
+        year_assumption_note = (
+            f"No year was specified, so the latest available year "
+            f"({assumed_year}) was used automatically."
+        )
+    else:
+        year_assumption_note = "Not applicable."
 
     prompt = f"""
 You are the response-generation component of a conversational statistics assistant.
@@ -31,6 +58,9 @@ Type: {graph_type}
 Title: {graph_title}
 Reason: {graph_reason}
 
+Year assumption:
+{year_assumption_note}
+
 Rules:
 - Use only the verified task results provided above.
 - Do not invent or estimate missing values.
@@ -40,6 +70,7 @@ Rules:
 - For response_mode="combine", explain how the results relate.
 - For response_mode="separate", present each result separately.
 - Keep the answer concise and conversational.
+- If the year assumption above is not "Not applicable.", explicitly mention in your response that the latest available year was used because none was specified.
 - If graph_needed is true, append a short section at the end exactly in this format:
 
 Recommended Visualization:

@@ -1,11 +1,27 @@
+import re
+
 from app.llm import get_llm
 from app.schemas import StructuredIntent
 from app.state import ConversationState
 
 
+RANKING_KEYWORD_PATTERN = re.compile(
+    r"\b(top|highest|lowest|rank|ranking|bottom)\b", re.IGNORECASE
+)
+
 
 def get_intent_llm():
     return get_llm().with_structured_output(StructuredIntent)
+
+
+def _is_obvious_ranking_request(intent_type: str, query: str) -> bool:
+    """True when confirmation would be redundant because the request is
+    unambiguously a ranking query -- either the LLM already classified it
+    as such, or the user's own wording makes it obvious."""
+    if intent_type == "rank":
+        return True
+
+    return bool(RANKING_KEYWORD_PATTERN.search(query))
 
 
 PROMPT = """
@@ -78,11 +94,12 @@ def extract_intent(state: ConversationState):
 
     if intent_data.get("intent_type") not in {"metadata", "conversation"}:
         if not intent_data.get("metrics") or not intent_data.get("geographies"):
-            needs_confirmation = True
-            summary = intent_data.get("intent_type", "request")
-            confirmation_question = (
-                f"I understood that you want to {summary}. Is that correct?"
-            )
+            if not _is_obvious_ranking_request(intent_data.get("intent_type"), query):
+                needs_confirmation = True
+                summary = intent_data.get("intent_type", "request")
+                confirmation_question = (
+                    f"I understood that you want to {summary}. Is that correct?"
+                )
 
     return {
         "current_intent": intent_data,
